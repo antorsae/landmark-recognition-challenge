@@ -42,7 +42,7 @@ import cv2
 import math
 import csv
 from multiprocessing import Pool
-from multiprocessing import cpu_count, Process, Queue, JoinableQueue
+from multiprocessing import cpu_count, Process, Queue, JoinableQueue, Lock
 
 from functools import partial
 from itertools import  islice
@@ -53,6 +53,7 @@ import copy
 
 import imgaug as ia
 from imgaug import augmenters as iaa
+import sharedmem
 
 SEED = 42
 
@@ -377,11 +378,18 @@ def process_item(item, aug = False, training = False):
 
     return img, one_hot_class_idx, item
 
-def process_item_worker(jobs, results):
+def process_item_worker(worker_id, lock, shared_mem_X, shared_mem_y, jobs, results):
     while True:
         task = jobs.get()
         item, aug, training = task
-        results.put(process_item(item, aug, training))
+        img, one_hot_class_idx, item = process_item(item, aug, training)
+        good_item = False
+        if one_hot_class_idx is not None:
+            lock.acquire()
+            shared_mem_X[worker_id,...] = img
+            shared_mem_y[worker_id,...] = one_hot_class_idx
+            good_item = True
+        results.put((worker_id, good_item, item))
 
 def gen(items, batch_size, training=True):
 
@@ -406,10 +414,16 @@ def gen(items, batch_size, training=True):
     #p = Pool(min(args.batch_size, cpu_count()))
     process_item_func  = partial(process_item, training=training)
 
-    jobs    = Queue(args.batch_size * 4)
-    results = JoinableQueue(args.batch_size * 2)
+    n_workers    = cpu_count() - 1
+    shared_mem_X = sharedmem.empty((n_workers, CROP_SIZE, CROP_SIZE, 3), dtype=np.float32)
+    shared_mem_y = sharedmem.empty((n_workers, N_CLASSES),               dtype=np.float32)
+    locks        = [Lock()] * n_workers
+    jobs         = Queue(args.batch_size * 4)
+    results      = JoinableQueue(args.batch_size * 2)
 
-    [Process(target=process_item_worker, args=(jobs, results)).start() for _ in range(cpu_count() - 1)]
+    [Process(
+        target=process_item_worker, 
+        args=(worker_id, lock, shared_mem_X, shared_mem_y, jobs, results)).start() for worker_id, lock in enumerate(locks)]
 
     bad_items = set()
     i = 0
@@ -443,11 +457,12 @@ def gen(items, batch_size, training=True):
 
             get_more_results = True
             while get_more_results:
-                _X, _y, _item = results.get() # blocks if none
+                worker_id, good_item, _item = results.get() # blocks if none
                 results.task_done()
 
-                if _X is not None:
-                    X[batch_idx], y[batch_idx] = _X, _y
+                if good_item:
+                    X[batch_idx], y[batch_idx] = shared_mem_X[worker_id], shared_mem_y[worker_id]
+                    locks[worker_id].release()
                     batch_idx += 1
                     if batch_idx == batch_size:
                         yield(X, y)
