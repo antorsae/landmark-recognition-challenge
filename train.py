@@ -42,7 +42,7 @@ import cv2
 import math
 import csv
 from multiprocessing import Pool
-from multiprocessing import cpu_count
+from multiprocessing import cpu_count, Process, Queue, JoinableQueue
 
 from functools import partial
 from itertools import  islice
@@ -342,7 +342,7 @@ def process_item(item, aug = False, training = False):
         except Exception:
             if args.verbose:
                 print('Decoding error:', item)
-            return None
+            return None, None, item
 
     shape = list(img.shape[:2])
 
@@ -354,12 +354,12 @@ def process_item(item, aug = False, training = False):
     if img.ndim != 3:
         if args.verbose:
             print('Ndims !=3 error:', item)
-        return None
+        return None, None, item
 
     if img.shape[2] != 3:
         if args.verbose:
             print('More than 3 channels error:', item)
-        return None
+        return None, None, item
 
     if training and aug:
         img = augment(img)
@@ -375,7 +375,13 @@ def process_item(item, aug = False, training = False):
 
     one_hot_class_idx = to_categorical(class_idx, N_CLASSES)
 
-    return img, one_hot_class_idx
+    return img, one_hot_class_idx, item
+
+def process_item_worker(jobs, results):
+    while True:
+        task = jobs.get()
+        item, aug, training = task
+        results.put(process_item(item, aug, training))
 
 def gen(items, batch_size, training=True):
 
@@ -385,7 +391,7 @@ def gen(items, batch_size, training=True):
     X = np.empty((batch_size, CROP_SIZE, CROP_SIZE, 3), dtype=np.float32)
 
     # class index
-    y = np.empty((batch_size, N_CLASSES),           dtype=np.float32)
+    y = np.empty((batch_size, N_CLASSES),               dtype=np.float32)
     
     if args.class_aware_sampling:
         items_per_class = defaultdict(list)
@@ -397,10 +403,16 @@ def gen(items, batch_size, training=True):
         classes = list(range(N_CLASSES))
         classes_running_copy = [ ]
 
-    p = Pool(min(args.batch_size, cpu_count()))
+    #p = Pool(min(args.batch_size, cpu_count()))
+    process_item_func  = partial(process_item, training=training)
+
+    jobs    = Queue(args.batch_size * 4)
+    results = JoinableQueue(args.batch_size * 2)
+
+    [Process(target=process_item_worker, args=(jobs, results)).start() for _ in range(cpu_count() - 1)]
 
     bad_items = set()
-    process_item_func  = partial(process_item, training=training)
+    i = 0
 
     while True:
 
@@ -409,12 +421,10 @@ def gen(items, batch_size, training=True):
 
         batch_idx = 0
 
-        if args.class_aware_sampling and training:
-            items_done  = 0
-            while items_done < len(items):
-                item_batch = []
-                aug_batch  = []
-                for _ in range(batch_size * (2 if args.mix_up and training else 1)):
+        items_done  = 0
+        while items_done < len(items):
+            while not jobs.full():
+                if training and args.class_aware_sampling:
                     if len(classes_running_copy) == 0:
                         random.shuffle(classes)
                         classes_running_copy = copy.copy(classes)
@@ -423,78 +433,32 @@ def gen(items, batch_size, training=True):
                         random.shuffle(items_per_class_running[random_class])
                         items_per_class_running[random_class]=copy.deepcopy(items_per_class[random_class])
                     item = items_per_class_running[random_class].pop()
-                    item_batch.append(item)
-                    aug_batch.append(False if id_times_seen[get_id(item)] == 0 else True)
-                    id_times_seen[get_id(item)] += 1
+                else:
+                    item = items[i % len(items)]
+                    i += 1
+                aug = False if id_times_seen[get_id(item)] == 0 else True
+                jobs.put((item, aug, training))
+                id_times_seen[get_id(item)] += 1
+                items_done += 1
 
-                batch_results = p.starmap(process_item_func, zip(item_batch, aug_batch))
+            get_more_results = True
+            while get_more_results:
+                _X, _y, _item = results.get() # blocks if none
+                results.task_done()
 
-                if args.mix_up and training:
-                    mixed_batch_results = []
-                    alpha = 0.2
-                    for (X1, y1), (X2, y2) in zip(batch_results[0::2], batch_results[1::2]):
-                        l = np.random.beta(alpha, alpha)
-                        m_X  = X1 * l + (1-l) * X2
-                        m_y  = y1 * l + (1-l) * y2
-
-                        mixed_batch_results.append((m_X, m_y))
-                    
-                    item_batch    = ['?'] * batch_size     # fix
-                    batch_results = mixed_batch_results
-
-                for batch_result, item in zip(batch_results, item_batch):
-
-                    # FIX DUP CODE START
-                    if batch_result is not None:
-                        if True:# len(transforms) == 1:
-                            X[batch_idx], y[batch_idx] = batch_result
-                            batch_idx += 1
-                        else:
-                            for _X,_y in zip(*batch_result):
-                                X[batch_idx], y[batch_idx] = _X,_y
-                                batch_idx += 1
-                                if batch_idx == batch_size:
-                                    yield(X, y)
-                                    batch_idx = 0
-                    else: # if batch result is None
-                        bad_items.add(item)
-
+                if _X is not None:
+                    X[batch_idx], y[batch_idx] = _X, _y
+                    batch_idx += 1
                     if batch_idx == batch_size:
                         yield(X, y)
                         batch_idx = 0
-                    # FIX DUP CODE END
-                items_done += batch_size
+                else: # if batch result is None
+                    bad_items.add(_item)
 
-        else:
-
-            iter_items = iter(items)
-            for item_batch in iter(lambda:list(islice(iter_items, batch_size)), []):
-                
-                batch_results = p.map(process_item_func, item_batch)
-                for batch_result, item in zip(batch_results, item_batch):
-                    # FIX DUP CODE START
-                    if batch_result is not None:
-                        if True:#len(transforms) == 1:
-                            X[batch_idx], y[batch_idx] = batch_result
-                            batch_idx += 1
-                        else:
-                            for _X, _y in zip(*batch_result):
-                                X[batch_idx], y[batch_idx] = _X, _y
-                                batch_idx += 1
-                                if batch_idx == batch_size:
-                                    yield(X, y)
-                                    batch_idx = 0
-                    else: # if batch result is None
-                        bad_items.add(item)
-
-                    if batch_idx == batch_size:
-                        yield(X, y)
-                        batch_idx = 0
-                    # FIX DUP CODE END
+                get_more_results = not results.empty()
 
         if len(bad_items) > 0:
             print("\nRejected {} items: {}".format('trainining' if training else 'validation', len(bad_items)))
-            #print(bad_items)
 
 # MAIN
 if args.model:
