@@ -21,7 +21,7 @@ class HadamardClassifier(Layer):
         hadamard_size = 2 ** int(math.ceil(math.log(max(input_shape[1], self.output_dim), 2)))
         self.hadamard = K.constant(
             value=hadamard(hadamard_size, dtype=np.int8)[:input_shape[1], :self.output_dim])
-        
+
         init_scale = 1. / math.sqrt(self.output_dim)
 
         self.scale = self.add_weight(name='scale', 
@@ -46,3 +46,11 @@ class HadamardClassifier(Layer):
 
     def compute_output_shape(self, input_shape):
         return (input_shape[0], self.output_dim)
+
+    def get_config(self):
+        config = {
+            'output_dim': self.output_dim,
+            'activation': activations.serialize(self.activation),
+        }
+        base_config = super(HadamardClassifier, self).get_config()
+        return dict(list(base_config.items()) + list(config.items()))

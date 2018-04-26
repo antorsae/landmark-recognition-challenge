@@ -22,6 +22,7 @@ from keras.applications import *
 from keras import backend as K
 from keras.engine.topology import Layer
 import keras.losses
+from keras.utils import CustomObjectScope
 
 from multi_gpu_keras import multi_gpu_model
 
@@ -99,6 +100,7 @@ parser.add_argument('-pps', '--post-pool-size', type=int, default=2, help='Pooli
 parser.add_argument('-cs', '--crop-size', type=int, default=256, help='Crop size')
 parser.add_argument('-vpc', '--val-percent', type=float, default=0.15, help='Val percent')
 parser.add_argument('-cc', '--center-crops', nargs='*', type=int, default=[], help='Train on center crops only (not random crops) for the selected classes e.g. -cc 1 6 or all -cc -1')
+parser.add_argument('-ap', '--augmentation-probability', type=float, default=1., help='Probability of augmentation after 1st seen sample')
 parser.add_argument('-nf', '--no-flips', action='store_true', help='Dont use orientation flips for augmentation')
 parser.add_argument('-naf', '--non-aggressive-flips', action='store_true', help='Non-aggressive flips for augmentation')
 parser.add_argument('-fcm', '--freeze-classifier', action='store_true', help='Freeze classifier weights (useful to fine-tune FC layers)')
@@ -110,7 +112,7 @@ parser.add_argument('-gc', '--gradient-checkpointing', action='store_true', help
 parser.add_argument('-id', '--include-distractors', action='store_true', help='Include distractors from retrieval challenge')
 
 # test
-parser.add_argument('-t', '--test', action='store_true', help='Test model and generate CSV submission file')
+parser.add_argument('-t', '--test', action='store_true', help='Test model and generate CSV/npy submission file')
 parser.add_argument('-tt', '--test-train', action='store_true', help='Test model on the training set')
 parser.add_argument('-tcs', '--test-crop-supersampling', default=1, type=int, help='Factor of extra crops to sample during test, especially useful when crop size is less than 512, e.g. -tcs 4')
 parser.add_argument('-tta', action='store_true', help='Enable test time augmentation')
@@ -385,7 +387,7 @@ def process_item(item, aug = False, training = False, predict=False):
             loaded_pil = True   
         return None, None, item
 
-    if training and aug:
+    if training and aug and np.random.random() < args.augmentation_probability:
         img = augment(img)
         if np.random.random() < 0.0:
             show_image(img)
@@ -519,7 +521,8 @@ def gen(items, batch_size, training=True, predict=False):
 if args.model:
     print("Loading model " + args.model)
 
-    model = load_model(args.model, compile=False if args.test or (args.learning_rate is not None) else True)
+    with CustomObjectScope({'HadamardClassifier': HadamardClassifier}):
+        model = load_model(args.model, compile=False if args.test or (args.learning_rate is not None) else True)
     # e.g. DenseNet201_do0.3_doc0.0_avg-epoch128-val_acc0.964744.hdf5
     match = re.search(r'(([a-zA-Z\d]+)_cs[,A-Za-z_\d\.]+)-epoch(\d+)-.*\.hdf5', args.model)
     model_name = match.group(1)
@@ -617,12 +620,15 @@ elif not args.ensemble_models:
             if dropout != 0:
                 x = Dropout(dropout,                   name= 'dropout_fc{}_{:04.2f}'.format(i, dropout))(x)
 
-    activation ="softmax" if args.loss == 'categorical_crossentropy' else "sigmoid"
 
     if args.hadamard:
-        prediction   = HadamardClassifier(N_CLASSES, activation = activation, name= "predictions")(x)
+        x = HadamardClassifier(N_CLASSES, name= "logits")(x)
     else:
-        prediction   = Dense(N_CLASSES, activation = activation, name= "predictions")(x)
+        x = Dense(             N_CLASSES, name= "logits")(x)
+
+    activation ="softmax" if args.loss == 'categorical_crossentropy' else "sigmoid"
+
+    prediction = Activation(activation, name="predictions")(x)
 
     model = Model(inputs=(input_image), outputs=(prediction))
 
@@ -705,7 +711,7 @@ if not (args.test or args.test_train or args.ensemble_models):
         metrics={ 'predictions': ['categorical_accuracy']},
         )
 
-    metric  = "-val_acc{val_" +  "acc:.6f}"
+    metric  = "-val_acc{val_categorical_accuracy:.6f}"
     monitor = "val_categorical_accuracy"
 
     save_checkpoint = ModelCheckpoint(
@@ -739,6 +745,9 @@ if not (args.test or args.test_train or args.ensemble_models):
 
 elif args.test:
 
+    model = Model(inputs=model.input, outputs=model.outputs + [model.get_layer('logits').output])
+    model.summary()
+
     with open(TEST_CSV, 'r') as csvfile:
         reader = csv.reader(csvfile, delimiter=',', quotechar='|')
         next(reader)
@@ -746,7 +755,7 @@ elif args.test:
         for row in reader:
             all_test_ids.append(row[0][1:-1])
 
-    csv_name  = model_name + '.csv'
+    csv_name  = Path('csv') / (os.path.splitext(os.path.basename(args.model if args.model else args.weights))[0] + '.csv')
 
     with open(csv_name, 'w') as csvfile:
         csv_writer = csv.writer(csvfile, delimiter=',',quotechar='|', quoting=csv.QUOTE_MINIMAL)
@@ -756,6 +765,18 @@ elif args.test:
 
         batch_id = 0
         batch_idx = [ ]
+
+        def predict_minibatch():
+            predictions, logits = model.predict(imgs[:batch_id])
+            cats = np.argmax(predictions, axis=1)
+            for i, (cat, logit, _idx) in enumerate(zip(cats, logits, batch_idx)):
+                score = predictions[i, cat]
+                landmark = cat_to_landmark[cat]
+                np.save(Path('logits') / idx, logit)
+                if (score >= args.threshold) and (landmark != -1):
+                    csv_writer.writerow([_idx, "{} {}".format(landmark, score)])
+                else:
+                    csv_writer.writerow([_idx, ""])    
 
         for idx in tqdm(all_test_ids):
 
@@ -770,29 +791,12 @@ elif args.test:
                 batch_id += 1
 
                 if batch_id == args.batch_size:
-                    predictions = model.predict(imgs[:batch_id])
-                    cats = np.argmax(predictions, axis=1)
-                    for i, (cat, _idx) in enumerate(zip(cats, batch_idx)):
-                        score = predictions[i, cat]
-                        landmark = cat_to_landmark[cat]
-                        if (score >= args.threshold) and (landmark != -1):
-                            csv_writer.writerow([_idx, "{} {}".format(landmark, score)])
-                        else:
-                            csv_writer.writerow([_idx, ""])
+                    predict_minibatch()
                     batch_id = 0
                     batch_idx = [ ]
             else:
                 csv_writer.writerow([idx, ""])
 
         if batch_id != 0:
-            predictions = model.predict(imgs[:batch_id])
-            cats = np.argmax(predictions, axis=1)
-            for i, (cat, _idx) in enumerate(zip(cats, batch_idx)):
-                score = predictions[i, cat]
-                landmark = cat_to_landmark[cat]
-                if (score >= args.threshold) and (landmark != -1):
-                    csv_writer.writerow([_idx, "{} {}".format(landmark, score)])
-                else:
-                    csv_writer.writerow([_idx, ""])
-
+            predict_minibatch()
 
