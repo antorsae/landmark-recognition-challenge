@@ -122,6 +122,8 @@ parser.add_argument('-th', '--threshold', default=0., type=float, help='Ignore p
 
 args = parser.parse_args()
 
+training = not (args.test or args.test_train or args.ensemble_models)
+
 if not args.verbose:
     import warnings
     warnings.filterwarnings("ignore")
@@ -140,7 +142,8 @@ if args.gradient_checkpointing:
     import memory_saving_gradients
     K.__dict__["gradients"] = memory_saving_gradients.gradients_speed
 
-TRAIN_JPGS   = set(Path('train-dl').glob('*.jpg'))
+TRAIN_DIR    = 'train-dl'
+TRAIN_JPGS   = set(Path(TRAIN_DIR).glob('*.jpg'))
 TRAIN_IDS    = { os.path.splitext(os.path.basename(item))[0] for item in TRAIN_JPGS }
 
 if args.test:
@@ -522,7 +525,7 @@ if args.model:
     print("Loading model " + args.model)
 
     with CustomObjectScope({'HadamardClassifier': HadamardClassifier}):
-        model = load_model(args.model, compile=False if args.test or (args.learning_rate is not None) else True)
+        model = load_model(args.model, compile=False if not training or (args.learning_rate is not None) else True)
     # e.g. DenseNet201_do0.3_doc0.0_avg-epoch128-val_acc0.964744.hdf5
     match = re.search(r'(([a-zA-Z\d]+)_cs[,A-Za-z_\d\.]+)-epoch(\d+)-.*\.hdf5', args.model)
     model_name = match.group(1)
@@ -530,7 +533,7 @@ if args.model:
     CROP_SIZE = args.crop_size  = model.get_input_shape_at(0)[1]
     print("Overriding classifier: {} and crop size: {}".format(args.classifier, args.crop_size))
     last_epoch = int(match.group(3))
-    if args.learning_rate == None and not args.test:
+    if args.learning_rate == None and training:
         dummy_model = model
         args.learning_rate = K.eval(model.optimizer.lr)
         print("Resuming with learning rate: {:.2e}".format(args.learning_rate))
@@ -563,7 +566,7 @@ elif not args.ensemble_models:
 
     print("Base model has " + str(n_trainable) + "/" + str(len(classifier_model.layers)) + " trainable layers")
 
-    classifier_model.summary()
+    #classifier_model.summary()
 
     x = input_image
 
@@ -660,7 +663,7 @@ if not args.ensemble_models:
     model.summary()
     model = multi_gpu_model(model, gpus=args.gpus)
 
-if not (args.test or args.test_train or args.ensemble_models):
+if training:
 
     # TRAINING
     ids_train, ids_val, _, _ = train_test_split(
@@ -743,60 +746,88 @@ if not (args.test or args.test_train or args.ensemble_models):
             initial_epoch = last_epoch,
             )#class_weight={  'predictions': class_weight } if not args.class_aware_sampling else None)
 
-elif args.test:
+elif args.test or args.test_train:
 
     model = Model(inputs=model.input, outputs=model.outputs + [model.get_layer('logits').output])
     model.summary()
 
-    with open(TEST_CSV, 'r') as csvfile:
-        reader = csv.reader(csvfile, delimiter=',', quotechar='|')
-        next(reader)
-        all_test_ids = [ ]
-        for row in reader:
-            all_test_ids.append(row[0][1:-1])
+    if args.test:
+        with open(TEST_CSV, 'r') as csvfile:
+            reader = csv.reader(csvfile, delimiter=',', quotechar='|')
+            next(reader)
+            all_test_ids = [ ]
+            for row in reader:
+                all_test_ids.append(row[0][1:-1])
 
-    csv_name  = Path('csv') / (os.path.splitext(os.path.basename(args.model if args.model else args.weights))[0] + '.csv')
+    csv_name  = Path('csv') / (os.path.splitext(os.path.basename(args.model if args.model else args.weights))[0] +
+      ('_test' if args.test else '_train') + '.csv')
 
-    with open(csv_name, 'w') as csvfile:
-        csv_writer = csv.writer(csvfile, delimiter=',',quotechar='|', quoting=csv.QUOTE_MINIMAL)
-        csv_writer.writerow(['id','landmarks'])
+    if args.test:
+        all_ids  = all_test_ids
+        jpgs_dir = TEST_DIR
+        results  = None
+    else:
+        all_ids  = list(TRAIN_IDS)
+        jpgs_dir = TRAIN_DIR
+        results  = defaultdict(dict)
 
-        imgs = np.empty((args.batch_size, CROP_SIZE, CROP_SIZE, 3), dtype=np.float32)
+    with Pool(min(args.batch_size, cpu_count())) as pool:
+        process_item_func  = partial(process_item, predict = True)
 
-        batch_id = 0
-        batch_idx = [ ]
+        with open(csv_name, 'w') as csvfile:
 
-        def predict_minibatch():
-            predictions, logits = model.predict(imgs[:batch_id])
-            cats = np.argmax(predictions, axis=1)
-            for i, (cat, logit, _idx) in enumerate(zip(cats, logits, batch_idx)):
-                score = predictions[i, cat]
-                landmark = cat_to_landmark[cat]
-                np.save(Path('logits') / idx, logit)
-                if (score >= args.threshold) and (landmark != -1):
-                    csv_writer.writerow([_idx, "{} {}".format(landmark, score)])
-                else:
-                    csv_writer.writerow([_idx, ""])    
+            csv_writer = csv.writer(csvfile, delimiter=',',quotechar='|', quoting=csv.QUOTE_MINIMAL)
+            csv_writer.writerow(['id','landmarks'])
 
-        for idx in tqdm(all_test_ids):
+            imgs = np.empty((args.batch_size, CROP_SIZE, CROP_SIZE, 3), dtype=np.float32)
 
-            item = Path(TEST_DIR) / (idx + '.jpg')
+            batch_id = 0
+            batch_idx = [ ]
 
-            img, _, _ = process_item(item, predict = True)
+            def predict_minibatch():
+                predictions, logits = model.predict(imgs[:batch_id])
+                cats = np.argmax(predictions, axis=1)
+                for i, (cat, logit, _idx) in enumerate(zip(cats, logits, batch_idx)):
+                    score = predictions[i, cat]
+                    landmark = cat_to_landmark[cat]
+                    if results is not None:
+                        results[landmark][idx] = logit
+                    #np.save(Path('logits') / idx, logit)
+                    if (score >= args.threshold) and (landmark != -1):
+                        csv_writer.writerow([_idx, "{} {}".format(landmark, score)])
+                    else:
+                        csv_writer.writerow([_idx, ""])    
 
-            if img is not None:
+            for idxs in tqdm(
+                (all_ids[ii:ii+args.batch_size] for ii in range(0, len(all_ids), args.batch_size)), 
+                total=math.ceil(len(all_ids) / args.batch_size)):
 
-                imgs[batch_id,...] = img
-                batch_idx.append(idx)
-                batch_id += 1
+                items = [Path(jpgs_dir) / (idx + '.jpg') for idx in idxs]
 
-                if batch_id == args.batch_size:
-                    predict_minibatch()
-                    batch_id = 0
-                    batch_idx = [ ]
-            else:
-                csv_writer.writerow([idx, ""])
+                batch_results = pool.map(process_item_func, items)
 
-        if batch_id != 0:
-            predict_minibatch()
+                for idx, (img, _, _) in zip(idxs, batch_results):
+
+                    if img is not None:
+
+                        imgs[batch_id,...] = img
+                        batch_idx.append(idx)
+                        batch_id += 1
+
+                        if batch_id == args.batch_size:
+                            predict_minibatch()
+                            batch_id = 0
+                            batch_idx = [ ]
+                    else:
+                        csv_writer.writerow([idx, ""])
+
+            # predict remaining items (if any)
+            if batch_id != 0:
+                predict_minibatch()
+
+    if results is not None:
+        for landmark, dict_idx_logits in tqdm(results.items()):
+            np.savez(Path('logits') / str(landmark), **dict_idx_logits)
+
+
 
