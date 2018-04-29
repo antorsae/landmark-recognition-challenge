@@ -11,7 +11,7 @@ import math
 
 class HadamardClassifier(Layer):
 
-    def __init__(self, output_dim, activation=None, use_bias=True, l2_normalize =True, **kwargs):
+    def __init__(self, output_dim, activation=None, use_bias=True, l2_normalize=True, **kwargs):
         self.output_dim   = output_dim
         self.activation   = activations.get(activation)
         self.use_bias     = use_bias

@@ -56,6 +56,8 @@ import imgaug as ia
 from imgaug import augmenters as iaa
 import sharedmem
 from hadamard import HadamardClassifier
+from clr_callback import CyclicLR
+from kerassurgeon.operations import delete_layer, insert_layer, delete_channels
 
 SEED = 42
 
@@ -83,6 +85,7 @@ parser.add_argument('-doc', '--dropout-classifier', type=float, default=0., help
 parser.add_argument('-nfc', '--no-fcs', action='store_true', help='Dont add any FC at the end, just a softmax')
 parser.add_argument('-fc', '--fully-connected-layers', nargs='+', type=int, default=[512,256], help='Specify FC layers after classifier, e.g. -fc 1024 512 256')
 parser.add_argument('-f', '--freeze', type=int, default=0, help='Freeze first n CNN layers, e.g. --freeze 10')
+parser.add_argument('-fu', '--freeze-until', type=str, default=None, help='Freeze until named CNN layer, e.g. --freeze-until 10')
 parser.add_argument('-fca', '--fully-connected-activation', type=str, default='relu', help='Activation function to use in FC layers, e.g. -fca relu|selu|prelu|leakyrelu|elu|...')
 parser.add_argument('-bn', '--batch-normalization', action='store_true', help='Use batch normalization in FC layers')
 parser.add_argument('-kf', '--kernel-filter', action='store_true', help='Apply kernel filter')
@@ -93,8 +96,10 @@ parser.add_argument('-p', '--pooling', type=str, default='avg', help='Type of po
 parser.add_argument('-rp', '--reduce-pooling', type=int, default=None, help='If using pooling none add conv layers to reduce features, e.g. -rp 128')
 parser.add_argument('-lo', '--loss', type=str, default='categorical_crossentropy', help='Loss function')
 parser.add_argument('-hp', '--hadamard', action='store_true', help='Use Hadamard projection instead of FC layers, see https://arxiv.org/pdf/1801.04540.pdf')
+parser.add_argument('-l2', '--l2-normalize', action='store_true', help='Perform L2 normalization in Hadamard classifier')
 parser.add_argument('-pp', '--post-pooling', type=str, default=None, help='Add pooling layers after classifier, e.g. -pp avg|max')
 parser.add_argument('-pps', '--post-pool-size', type=int, default=2, help='Pooling factor for pooling layers after classifier, e.g. -pps 3')
+parser.add_argument('-dl', '--delete-layers', nargs='+', type=str, default=[], help='Specify layers to delete in classifier, e.g. -dl avg_pool')
 
 # training regime
 parser.add_argument('-cs', '--crop-size', type=int, default=256, help='Crop size')
@@ -556,17 +561,22 @@ elif not args.ensemble_models:
         input_shape=(CROP_SIZE, CROP_SIZE, 3), 
         pooling=args.pooling if args.pooling != 'none' else None)
 
+    for layer in args.delete_layers:
+        classifier_model = delete_layer(classifier_model, classifier_model.get_layer(layer))
+
     trainable = False
     n_trainable = 0
+
     for i, layer in enumerate(classifier_model.layers):
-        if i >= args.freeze:
+        if (i >= args.freeze and args.freeze_until is None) or (layer.name == args.freeze_until):
             trainable = True
+        if trainable:
             n_trainable += 1
         layer.trainable = trainable
 
     print("Base model has " + str(n_trainable) + "/" + str(len(classifier_model.layers)) + " trainable layers")
 
-    #classifier_model.summary()
+    classifier_model.summary()
 
     x = input_image
 
@@ -625,11 +635,13 @@ elif not args.ensemble_models:
 
 
     if args.hadamard:
-        x = HadamardClassifier(N_CLASSES, name= "logits")(x)
+        x = HadamardClassifier(N_CLASSES, name= "logits", l2_normalize=args.l2_normalize)(x)
     else:
         x = Dense(             N_CLASSES, name= "logits")(x)
 
     activation ="softmax" if args.loss == 'categorical_crossentropy' else "sigmoid"
+
+    print("Using {} activation and {} loss for predictions". format(activation, args.loss))
 
     prediction = Activation(activation, name="predictions")(x)
 
@@ -637,6 +649,7 @@ elif not args.ensemble_models:
 
     model_name = args.classifier + \
         ('_hp' if args.hadamard else '') + \
+        ('_l2' if args.l2_normalize else '_nol2' if args.hadamard else '') + \
         ('_pp{}{}'.format(args.post_pooling, args.post_pool_size) if args.post_pooling else '') + \
         '_loss{}'.format(args.loss) + \
         '_cs{}'.format(args.crop_size) + \
@@ -724,10 +737,9 @@ if training:
 
     reduce_lr = ReduceLROnPlateau(monitor=monitor, factor=0.2, patience=5, min_lr=1e-9, epsilon = 0.00001, verbose=1, mode='max')
     
-    if False:
-        clr = CyclicLR(base_lr=args.learning_rate, max_lr=args.learning_rate*10,
-                            step_size=int(math.ceil(len(ids_train)  // args.batch_size)) * 4, mode='exp_range',
-                            gamma=0.99994)
+    clr = CyclicLR(base_lr=args.learning_rate*4, max_lr=args.learning_rate,
+                        step_size=int(math.ceil(len(ids_train)  / args.batch_size)) * 1, mode='exp_range',
+                        gamma=0.99994)
 
     callbacks = [save_checkpoint]
 
