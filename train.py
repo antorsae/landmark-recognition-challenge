@@ -635,7 +635,7 @@ elif not args.ensemble_models:
 
 
     if args.hadamard:
-        x = HadamardClassifier(N_CLASSES, name= "logits", l2_normalize=args.l2_normalize)(x)
+        x, _ = HadamardClassifier(N_CLASSES, name= "logits", l2_normalize=args.l2_normalize, output_raw_logits=True)(x)
     else:
         x = Dense(             N_CLASSES, name= "logits")(x)
 

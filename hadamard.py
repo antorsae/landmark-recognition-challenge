@@ -11,11 +11,12 @@ import math
 
 class HadamardClassifier(Layer):
 
-    def __init__(self, output_dim, activation=None, use_bias=True, l2_normalize=True, **kwargs):
-        self.output_dim   = output_dim
-        self.activation   = activations.get(activation)
-        self.use_bias     = use_bias
-        self.l2_normalize = l2_normalize
+    def __init__(self, output_dim, activation=None, use_bias=True, l2_normalize=True, output_raw_logits=False, **kwargs):
+        self.output_dim        = output_dim
+        self.activation        = activations.get(activation)
+        self.use_bias          = use_bias
+        self.l2_normalize      = l2_normalize
+        self.output_raw_logits = output_raw_logits
         super(HadamardClassifier, self).__init__(**kwargs)
 
     def build(self, input_shape):
@@ -42,13 +43,22 @@ class HadamardClassifier(Layer):
     def call(self, x):
         output = K.l2_normalize(x, axis=-1) if self.l2_normalize else x
         output = -self.scale * K.dot(output, self.hadamard) # pity .dot requires both tensors to be same type, the last one could be int8
+        if self.output_raw_logits:
+            output_logits = -self.scale * K.dot(x, self.hadamard) # probably better to reuse output * l2norm
         if self.use_bias:
             output = K.bias_add(output, self.bias)
+            if self.output_raw_logits:
+                output_logits = K.bias_add(output_logits, self.bias)
         if self.activation is not None:
             output = self.activation(output)
+
+        if self.output_raw_logits:
+            return [output, output_logits]
         return output
 
     def compute_output_shape(self, input_shape):
+        if self.output_raw_logits:
+            return [(input_shape[0], self.output_dim)] * 2
         return (input_shape[0], self.output_dim)
 
     def get_config(self):
@@ -56,7 +66,8 @@ class HadamardClassifier(Layer):
             'output_dim': self.output_dim,
             'activation': activations.serialize(self.activation),
             'use_bias': self.use_bias,
-            'l2_normalize':self.l2_normalize,
+            'l2_normalize': self.l2_normalize,
+            'output_raw_logits' : self.output_raw_logits
         }
         base_config = super(HadamardClassifier, self).get_config()
         return dict(list(base_config.items()) + list(config.items()))
