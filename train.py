@@ -13,7 +13,7 @@ from sklearn.model_selection import train_test_split
 from sklearn.utils import class_weight
 
 from keras.optimizers import Adam, Adadelta, SGD
-from keras.callbacks import ModelCheckpoint, ReduceLROnPlateau
+from keras.callbacks import ModelCheckpoint, ReduceLROnPlateau, Callback
 from keras.models import load_model, Model
 from keras.layers import concatenate, Lambda, Input, Dense, Dropout, Flatten, Conv2D, MaxPooling2D, \
         BatchNormalization, Activation, GlobalAveragePooling2D, AveragePooling2D, Reshape, SeparableConv2D
@@ -91,6 +91,7 @@ parser.add_argument('-bn', '--batch-normalization', action='store_true', help='U
 parser.add_argument('-kf', '--kernel-filter', action='store_true', help='Apply kernel filter')
 parser.add_argument('-lkf', '--learn-kernel-filter', action='store_true', help='Add a trainable kernel filter before classifier')
 parser.add_argument('-cm', '--classifier', type=str, default='ResNet50', help='Base classifier model to use')
+parser.add_argument('-pcs', '--print-classifier-summary', action='store_true', help='Print classifier model summary')
 parser.add_argument('-uiw', '--use-imagenet-weights', action='store_true', help='Use imagenet weights (transfer learning)')
 parser.add_argument('-p', '--pooling', type=str, default='avg', help='Type of pooling to use: avg|max|none')
 parser.add_argument('-rp', '--reduce-pooling', type=int, default=None, help='If using pooling none add conv layers to reduce features, e.g. -rp 128')
@@ -430,9 +431,47 @@ def process_item_worker(worker_id, lock, shared_mem_X, shared_mem_y, jobs, resul
             is_good_item = True
         results.put((worker_id, is_good_item, item))
 
-def gen(items, batch_size, training=True, predict=False):
+class AccuracyReset(Callback):
+
+    N_BATCHES = 20
+
+    def on_train_begin(self, logs={}):
+
+        self.aucs = []
+        self.losses = []
+        self.reset_accuracy()
+ 
+    def on_train_end(self, logs={}):
+        return
+ 
+    def on_epoch_begin(self, epoch, logs={}):
+        return
+ 
+    def on_epoch_end(self, epoch, logs={}):
+        return
+ 
+    def on_batch_begin(self, batch, logs={}):
+        #print(logs)
+        return
+ 
+    def on_batch_end(self, batch, logs={}):
+        self.last_accuracies[self.last_accuracies_i % AccuracyReset.N_BATCHES ] = logs['categorical_accuracy']
+        self.last_accuracies_i += 1
+        #print( self.last_accuracies)
+        if np.all(self.last_accuracies >= 0.9):
+            self.accuracy_reached = True
+        return
+
+    def reset_accuracy(self):
+        self.accuracy_reached = False
+        self.last_accuracies = np.zeros(AccuracyReset.N_BATCHES)
+        self.last_accuracies_i = 0
+        return
+
+def gen(items, batch_size, training=True, predict=False, accuracy_callback=None):
 
     validation = not training 
+    items_set = set(items)
 
     # X image crops
     X = np.empty((batch_size, CROP_SIZE, CROP_SIZE, 3), dtype=np.float32)
@@ -443,15 +482,21 @@ def gen(items, batch_size, training=True, predict=False):
     # class index
     y = np.empty((batch_size, N_CLASSES),               dtype=np.float32)
     
+    n_group_classes = int(math.ceil(N_CLASSES / batch_size))
     if training and args.class_aware_sampling:
         items_per_class = defaultdict(list)
+        n_items_per_class = np.zeros(N_CLASSES, dtype=np.int64)
         for item in items:
             class_idx = get_class(item)
             items_per_class[class_idx].append(item)
-
+            n_items_per_class[class_idx] += 1
         items_per_class_running=copy.deepcopy(items_per_class)
-        classes = list(range(N_CLASSES))
-        classes_running_copy = [ ]
+        classes_groups = np.array_split(np.argsort(n_items_per_class)[::-1], n_group_classes)
+        classes_current_group = -1
+        classes_current_group_items_to_see = 0
+        classes_running_copy  = [ ]
+        classes_seen = set()
+        previous_classes_seen = set()
 
     n_workers    = (cpu_count() - 1) if not predict else 1 # for prediction we need to guarantee order
     shared_mem_X = sharedmem.empty((n_workers, CROP_SIZE, CROP_SIZE, 3), dtype=np.float32)
@@ -478,14 +523,38 @@ def gen(items, batch_size, training=True, predict=False):
         while items_done < len(items):
             while not jobs.full():
                 if training and args.class_aware_sampling:
-                    if len(classes_running_copy) == 0:
-                        random.shuffle(classes)
-                        classes_running_copy = copy.copy(classes)
-                    random_class = classes_running_copy.pop()
-                    if len(items_per_class_running[random_class]) == 0:
-                        random.shuffle(items_per_class_running[random_class])
-                        items_per_class_running[random_class]=copy.deepcopy(items_per_class[random_class])
-                    item = items_per_class_running[random_class].pop()
+                    if np.random.rand() >= 0.2 or not previous_classes_seen:
+                        if classes_current_group_items_to_see == 0 or accuracy_callback.accuracy_reached:
+                            print(classes_current_group_items_to_see, accuracy_callback.last_accuracies)
+                            accuracy_callback.reset_accuracy()
+                            classes_current_group_items_to_see = int(8000 * N_CLASSES / n_group_classes) # each item seen 1000 times
+                            classes_current_group = (classes_current_group + 1) % n_group_classes
+                            classes = list(classes_groups[classes_current_group])
+                            classes_running_copy = []
+                            previous_classes_seen = previous_classes_seen.union(classes_seen)
+                            classes_seen = set()
+                            print("Class group {}/{} ({:.2f}% of items)".format(
+                                classes_current_group, 
+                                n_group_classes,
+                                100. * sum([n_items_per_class[class_id] for class_id in previous_classes_seen.union(set(classes))]) / len(items),
+                                ))
+                        if len(classes_running_copy) == 0:
+                            random.shuffle(classes)
+                            classes_running_copy = list(classes)
+                        random_class = classes_running_copy.pop()
+                        classes_current_group_items_to_see -= 1
+                    else:
+                        # pick a random class of the ones seen previously to make sure the net
+                        # doesn't forget what it's learned
+                        random_class = random.sample(previous_classes_seen, 1)[0]
+                    training_item_chosen = False
+                    while not training_item_chosen:
+                        if len(items_per_class_running[random_class]) == 0:
+                            random.shuffle(items_per_class_running[random_class])
+                            items_per_class_running[random_class]=copy.deepcopy(items_per_class[random_class])
+                        item = items_per_class_running[random_class].pop()
+                        training_item_chosen = item in items_set
+                    classes_seen.add(random_class)
                 else:
                     item = items[i % len(items)]
                     i += 1
@@ -576,7 +645,8 @@ elif not args.ensemble_models:
 
     print("Base model has " + str(n_trainable) + "/" + str(len(classifier_model.layers)) + " trainable layers")
 
-    classifier_model.summary()
+    if args.print_classifier_summary:
+        classifier_model.summary()
 
     x = input_image
 
@@ -637,7 +707,7 @@ elif not args.ensemble_models:
     if args.hadamard:
         x, _ = HadamardClassifier(N_CLASSES, name= "logits", l2_normalize=args.l2_normalize, output_raw_logits=True)(x)
     else:
-        x = Dense(             N_CLASSES, name= "logits")(x)
+        x    = Dense(             N_CLASSES, name= "logits")(x)
 
     activation ="softmax" if args.loss == 'categorical_crossentropy' else "sigmoid"
 
@@ -741,7 +811,8 @@ if training:
                         step_size=int(math.ceil(len(ids_train)  / args.batch_size)) * 1, mode='exp_range',
                         gamma=0.99994)
 
-    callbacks = [save_checkpoint]
+    accuracy_callback = AccuracyReset()
+    callbacks = [save_checkpoint, accuracy_callback]
 
     if args.cyclic_learning_rate:
         callbacks.append(clr)
@@ -749,18 +820,18 @@ if training:
         callbacks.append(reduce_lr)
     
     model.fit_generator(
-            generator        = gen(ids_train, args.batch_size),
+            generator        = gen(ids_train, args.batch_size, accuracy_callback = accuracy_callback),
             steps_per_epoch  = int(math.ceil(len(ids_train)  / args.batch_size)),
             validation_data  = gen(ids_val, args.batch_size, training = False),
             validation_steps = int(math.ceil(len(ids_val) / args.batch_size)),
             epochs = args.max_epoch,
             callbacks = callbacks,
             initial_epoch = last_epoch,
-            )#class_weight={  'predictions': class_weight } if not args.class_aware_sampling else None)
+            class_weight={  'predictions': class_weight } if not args.class_aware_sampling else None)
 
 elif args.test or args.test_train:
 
-    model = Model(inputs=model.input, outputs=model.outputs + [model.get_layer('logits').output])
+    model = Model(inputs=model.input, outputs=model.outputs + [model.get_layer('logits').output[1]])
     model.summary()
 
     if args.test:
@@ -779,7 +850,7 @@ elif args.test or args.test_train:
         jpgs_dir = TEST_DIR
         results  = None
     else:
-        all_ids  = list(TRAIN_IDS)
+        all_ids  = list(TRAIN_IDS)[:20000]
         jpgs_dir = TRAIN_DIR
         results  = defaultdict(dict)
 
