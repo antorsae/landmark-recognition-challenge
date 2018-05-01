@@ -88,8 +88,6 @@ parser.add_argument('-f', '--freeze', type=int, default=0, help='Freeze first n 
 parser.add_argument('-fu', '--freeze-until', type=str, default=None, help='Freeze until named CNN layer, e.g. --freeze-until 10')
 parser.add_argument('-fca', '--fully-connected-activation', type=str, default='relu', help='Activation function to use in FC layers, e.g. -fca relu|selu|prelu|leakyrelu|elu|...')
 parser.add_argument('-bn', '--batch-normalization', action='store_true', help='Use batch normalization in FC layers')
-parser.add_argument('-kf', '--kernel-filter', action='store_true', help='Apply kernel filter')
-parser.add_argument('-lkf', '--learn-kernel-filter', action='store_true', help='Add a trainable kernel filter before classifier')
 parser.add_argument('-cm', '--classifier', type=str, default='ResNet50', help='Base classifier model to use')
 parser.add_argument('-pcs', '--print-classifier-summary', action='store_true', help='Print classifier model summary')
 parser.add_argument('-uiw', '--use-imagenet-weights', action='store_true', help='Use imagenet weights (transfer learning)')
@@ -107,28 +105,22 @@ parser.add_argument('-cs', '--crop-size', type=int, default=256, help='Crop size
 parser.add_argument('-vpc', '--val-percent', type=float, default=0.15, help='Val percent')
 parser.add_argument('-cc', '--center-crops', nargs='*', type=int, default=[], help='Train on center crops only (not random crops) for the selected classes e.g. -cc 1 6 or all -cc -1')
 parser.add_argument('-ap', '--augmentation-probability', type=float, default=1., help='Probability of augmentation after 1st seen sample')
-parser.add_argument('-nf', '--no-flips', action='store_true', help='Dont use orientation flips for augmentation')
-parser.add_argument('-naf', '--non-aggressive-flips', action='store_true', help='Non-aggressive flips for augmentation')
 parser.add_argument('-fcm', '--freeze-classifier', action='store_true', help='Freeze classifier weights (useful to fine-tune FC layers)')
 parser.add_argument('-cas', '--class-aware-sampling', action='store_true', help='Use class aware sampling to balance dataset (instead of class weights)')
-parser.add_argument('-mu', '--mix-up', action='store_true', help='Use mix-up see: https://arxiv.org/abs/1710.09412')
-parser.add_argument('-gc', '--gradient-checkpointing', action='store_true', help='Enable for huge batches, see https://github.com/openai/gradient-checkpointing')
+parser.add_argument('-casac', '--class-aware-sampling-accuracy-target', type=float, default=0.9, help='Threshold to move to next landmark group (when using -cas)')
+parser.add_argument('-casp', '--class-aware-sampling-patience', type=int, default=8000, help='Patience in number of items to move to nexty landmark_to_cat (when using -cas)')
 
 # dataset (training)
-parser.add_argument('-id', '--include-distractors', action='store_true', help='Include distractors from retrieval challenge')
+parser.add_argument('-id', '--include-distractors', action='store_true', help='Include distractors from retrieval challenge') # DO NOT USE YET
 
 # test
 parser.add_argument('-t', '--test', action='store_true', help='Test model and generate CSV/npy submission file')
 parser.add_argument('-tt', '--test-train', action='store_true', help='Test model on the training set')
-parser.add_argument('-tcs', '--test-crop-supersampling', default=1, type=int, help='Factor of extra crops to sample during test, especially useful when crop size is less than 512, e.g. -tcs 4')
-parser.add_argument('-tta', action='store_true', help='Enable test time augmentation')
-parser.add_argument('-e', '--ensembling', type=str, default='arithmetic', help='Type of ensembling: arithmetic|geometric|argmax for TTA')
-parser.add_argument('-em', '--ensemble-models', nargs='*', type=str, default=None, help='Type of ensembling: arithmetic|geometric|argmax for TTA')
 parser.add_argument('-th', '--threshold', default=0., type=float, help='Ignore predictions less than threshold, e.g. -th 0.6')
 
 args = parser.parse_args()
 
-training = not (args.test or args.test_train or args.ensemble_models)
+training = not (args.test or args.test_train)
 
 if not args.verbose:
     import warnings
@@ -458,7 +450,7 @@ class AccuracyReset(Callback):
         self.last_accuracies[self.last_accuracies_i % AccuracyReset.N_BATCHES ] = logs['categorical_accuracy']
         self.last_accuracies_i += 1
         #print( self.last_accuracies)
-        if np.all(self.last_accuracies >= 0.9):
+        if np.all(self.last_accuracies >= args.class_aware_sampling_accuracy_target):
             self.accuracy_reached = True
         return
 
@@ -520,21 +512,21 @@ def gen(items, batch_size, training=True, predict=False, accuracy_callback=None)
         batch_idx = 0
 
         items_done  = 0
-        while items_done < len(items):
+        while items_done < len(items):  
             while not jobs.full():
                 if training and args.class_aware_sampling:
                     if np.random.rand() >= 0.2 or not previous_classes_seen:
                         if classes_current_group_items_to_see == 0 or accuracy_callback.accuracy_reached:
-                            print(classes_current_group_items_to_see, accuracy_callback.last_accuracies)
+                            print(accuracy_callback.last_accuracies)
                             accuracy_callback.reset_accuracy()
-                            classes_current_group_items_to_see = int(8000 * N_CLASSES / n_group_classes) # each item seen 1000 times
+                            classes_current_group_items_to_see = int(args.class_aware_sampling_patience * N_CLASSES / n_group_classes)
                             classes_current_group = (classes_current_group + 1) % n_group_classes
                             classes = list(classes_groups[classes_current_group])
                             classes_running_copy = []
                             previous_classes_seen = previous_classes_seen.union(classes_seen)
                             classes_seen = set()
                             print("Class group {}/{} ({:.2f}% of items)".format(
-                                classes_current_group, 
+                                classes_current_group+1, 
                                 n_group_classes,
                                 100. * sum([n_items_per_class[class_id] for class_id in previous_classes_seen.union(set(classes))]) / len(items),
                                 ))
@@ -742,9 +734,8 @@ elif not args.ensemble_models:
             match = re.search(r'([,A-Za-z_\d\.]+)-epoch(\d+)-.*\.hdf5', args.weights)
             last_epoch = int(match.group(2))
 
-if not args.ensemble_models:
-    model.summary()
-    model = multi_gpu_model(model, gpus=args.gpus)
+model.summary()
+model = multi_gpu_model(model, gpus=args.gpus)
 
 if training:
 
