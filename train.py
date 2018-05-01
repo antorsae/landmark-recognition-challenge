@@ -136,10 +136,6 @@ if args.gpus is None:
 
 args.batch_size *= args.gpus
 
-if args.gradient_checkpointing:
-    import memory_saving_gradients
-    K.__dict__["gradients"] = memory_saving_gradients.gradients_speed
-
 TRAIN_DIR    = 'train-dl'
 TRAIN_JPGS   = set(Path(TRAIN_DIR).glob('*.jpg'))
 TRAIN_IDS    = { os.path.splitext(os.path.basename(item))[0] for item in TRAIN_JPGS }
@@ -213,6 +209,8 @@ def get_class(item):
 def get_id(item):
     return os.path.splitext(os.path.basename(item))[0]
 
+# since we are doing stratified train/val split we need to dupe images
+# from landmarks wirth just 1 item
 ids_to_dup = [ids[0] for cat,ids in cat_to_ids.items() if len(ids) == 1]
 
 print(len(ids_to_dup))
@@ -339,6 +337,14 @@ def augment(img):
 
     return img
 
+# reads the image referenced by item from disk and
+# returns img, one_hot_class_idx, item
+# img: processed image (normalized as excepted by NN) and augmented if both aug and training are True
+# one_hot_class_idx: one-hot vector of cat id (if predict is false)
+# item: same as passed 
+# 
+# img and one_hot_class_idx will be None if error reading item
+#
 def process_item(item, aug = False, training = False, predict=False):
 
     load_img_fast_jpg  = lambda img_path: jpeg.JPEG(img_path).decode()
@@ -407,6 +413,7 @@ def process_item(item, aug = False, training = False, predict=False):
 
     return img, one_hot_class_idx, item
 
+# multiprocess worker to read items and put them in shared memory for consumer
 def process_item_worker(worker_id, lock, shared_mem_X, shared_mem_y, jobs, results):
     # make sure augmentations are different for each worker
     np.random.seed()
@@ -423,6 +430,7 @@ def process_item_worker(worker_id, lock, shared_mem_X, shared_mem_y, jobs, resul
             is_good_item = True
         results.put((worker_id, is_good_item, item))
 
+# Callback to monitor accuracy on a per-batch basis
 class AccuracyReset(Callback):
 
     N_BATCHES = 20
@@ -460,6 +468,7 @@ class AccuracyReset(Callback):
         self.last_accuracies_i = 0
         return
 
+# main generator. Although predict=True mode works it is not used here.
 def gen(items, batch_size, training=True, predict=False, accuracy_callback=None):
 
     validation = not training 
@@ -513,9 +522,11 @@ def gen(items, batch_size, training=True, predict=False, accuracy_callback=None)
 
         items_done  = 0
         while items_done < len(items):  
+            # fill the queue to make sure CPU is always busy
             while not jobs.full():
                 if training and args.class_aware_sampling:
                     if np.random.rand() >= 0.2 or not previous_classes_seen:
+                        # if already reached patience or accuracy, build classes list with this group's classes
                         if classes_current_group_items_to_see == 0 or accuracy_callback.accuracy_reached:
                             print(accuracy_callback.last_accuracies)
                             accuracy_callback.reset_accuracy()
@@ -530,6 +541,7 @@ def gen(items, batch_size, training=True, predict=False, accuracy_callback=None)
                                 n_group_classes,
                                 100. * sum([n_items_per_class[class_id] for class_id in previous_classes_seen.union(set(classes))]) / len(items),
                                 ))
+                        # if we've run out of items in this class, replenish it
                         if len(classes_running_copy) == 0:
                             random.shuffle(classes)
                             classes_running_copy = list(classes)
@@ -539,6 +551,9 @@ def gen(items, batch_size, training=True, predict=False, accuracy_callback=None)
                         # pick a random class of the ones seen previously to make sure the net
                         # doesn't forget what it's learned
                         random_class = random.sample(previous_classes_seen, 1)[0]
+
+                    # pick an item from class making sure it belongs to the items
+                    # this is not strictly needed, though
                     training_item_chosen = False
                     while not training_item_chosen:
                         if len(items_per_class_running[random_class]) == 0:
@@ -548,19 +563,23 @@ def gen(items, batch_size, training=True, predict=False, accuracy_callback=None)
                         training_item_chosen = item in items_set
                     classes_seen.add(random_class)
                 else:
+                    # if not using class-aware sampling, just pick one item
                     item = items[i % len(items)]
                     i += 1
                 if not predict:
+                    # do not augment the first time the net has seen an item
                     aug = False if id_times_seen[get_id(item)] == 0 else True
                     id_times_seen[get_id(item)] += 1
                 else:
+                    # do not augment if predicting
                     aug = False
                 jobs.put((item, aug, training, predict))
                 items_done += 1
 
+            # loop over results and yield until no more resuls left
             get_more_results = True
             while get_more_results:
-                worker_id, is_good_item, _item = results.get() # blocks if none
+                worker_id, is_good_item, _item = results.get() # blocks/waits if None
                 results.task_done()
 
                 if is_good_item:
@@ -645,6 +664,7 @@ elif not args.ensemble_models:
     x = classifier_model(x)
 
     if args.reduce_pooling and x.shape.ndims == 4:
+        # reduce feature channels after classifier using convs
 
         pool_features = int(x.shape[3])
 
@@ -656,6 +676,7 @@ elif not args.ensemble_models:
             x = Activation('relu', name='relu_reduce_pooling{}'.format(it))(x)
         
     if x.shape.ndims > 2:
+        # reduce spatial channels after classifier using pooling
         if args.post_pooling == 'avg':
             x = AveragePooling2D(pool_size=args.post_pool_size)(x)
         elif args.post_pooling == 'max':
@@ -697,6 +718,7 @@ elif not args.ensemble_models:
 
 
     if args.hadamard:
+        # ignore unscaled logits for now (_)
         x, _ = HadamardClassifier(N_CLASSES, name= "logits", l2_normalize=args.l2_normalize, output_raw_logits=True)(x)
     else:
         x    = Dense(             N_CLASSES, name= "logits")(x)
@@ -739,10 +761,11 @@ model = multi_gpu_model(model, gpus=args.gpus)
 
 if training:
 
-    # TRAINING
+    # split train/val using stratification
     ids_train, ids_val, _, _ = train_test_split(
         TRAIN_JPGS, TRAIN_CATS, test_size=args.val_percent, random_state=SEED, stratify=TRAIN_CATS)
 
+    # compute class weight if not using class-aware sampling
     classes_train = [get_class(idx) for idx in ids_train]
     class_weight = class_weight.compute_class_weight('balanced', np.unique(classes_train), classes_train)
 
@@ -755,19 +778,6 @@ if training:
     else:
         assert False
 
-    # TODO 
-    def calculate_mAP(y_true,y_pred):
-        num_classes = y_true.shape[1]
-        average_precisions = []
-        relevant = K.sum(K.round(K.clip(y_true, 0, 1)))
-        tp_whole = K.round(K.clip(y_true * y_pred, 0, 1))
-        for index in range(num_classes):
-            temp = K.sum(tp_whole[:,:index+1],axis=1)
-            average_precisions.append(temp * (1/(index + 1)))
-        AP = Add()(average_precisions) / relevant
-        mAP = K.mean(AP,axis=0)
-        return mAP
-
     if args.freeze_classifier:
         for layer in model.layers:
             if isinstance(layer, Model):
@@ -777,11 +787,6 @@ if training:
                     classifier_layer.trainable = False
 
     loss = { 'predictions' : args.loss} 
-
-    # monkey-patch loss so model loads ok
-    # https://github.com/fchollet/keras/issues/5916#issuecomment-290344248
-    #keras.losses.categorical_crossentropy_and_variance = categorical_crossentropy_and_variance
-    #keras.metrics.calculate_mAP = calculate_mAP
 
     model.compile(optimizer=opt, 
         loss=loss, 
@@ -810,6 +815,8 @@ if training:
     else:
         callbacks.append(reduce_lr)
     
+    # an epoch is just number of training samples, however if using class-aware sampling items are 
+    # oversampled so one epoch does not see all distinct training items.
     model.fit_generator(
             generator        = gen(ids_train, args.batch_size, accuracy_callback = accuracy_callback),
             steps_per_epoch  = int(math.ceil(len(ids_train)  / args.batch_size)),
@@ -822,6 +829,8 @@ if training:
 
 elif args.test or args.test_train:
 
+    # build model with two outputs, regular one plus unscaled logits from hadamard classifier
+    # FIX: this will fail if not using hadamard
     model = Model(inputs=model.input, outputs=model.outputs + [model.get_layer('logits').output[1]])
     model.summary()
 
@@ -841,7 +850,7 @@ elif args.test or args.test_train:
         jpgs_dir = TEST_DIR
         results  = None
     else:
-        all_ids  = list(TRAIN_IDS)[:20000]
+        all_ids  = list(TRAIN_IDS)[:20000] # CHANGE
         jpgs_dir = TRAIN_DIR
         results  = defaultdict(dict)
 
