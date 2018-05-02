@@ -286,47 +286,8 @@ def augment(img):
             # apply the following augmenters to most images
             iaa.Fliplr(0.5), # horizontally flip 50% of all images
             # crop images by -5% to 10% of their height/width
-            sometimes(iaa.Crop(
+            iaa.Crop(
                 percent=(0, 0.2),
-            )),
-            sometimes(iaa.Affine(
-                scale={"x": (1, 1.2), "y": (1, 1.2)}, # scale images to 80-120% of their size, individually per axis
-                translate_percent={"x": (-0.1, 0.1), "y": (-0.1, 0.1)}, # translate by -20 to +20 percent (per axis)
-                rotate=(-5, 5), # rotate by -45 to +45 degrees
-                shear=(-5, 5), # shear by -16 to +16 degrees
-                order=[0, 1], # use nearest neighbour or bilinear interpolation (fast)
-                cval=(0, 255), # if mode is constant, use a cval between 0 and 255
-                mode="reflect" # use any of scikit-image's warping modes (see 2nd image from the top for examples)
-            )),
-            # execute 0 to 5 of the following (less important) augmenters per image
-            # don't execute all of them, as that would often be way too strong
-            iaa.SomeOf((0, 1),
-                [
-                    iaa.OneOf([
-                        iaa.GaussianBlur((0, 2.0)), # blur images with a sigma between 0 and 3.0
-                        iaa.AverageBlur(k=(2, 5)), # blur image using local means with kernel sizes between 2 and 7
-                    ]),
-                    iaa.Sharpen(alpha=(0, 1.0), lightness=(0.75, 1.5)), # sharpen images
-                    # search either for all edges or for directed edges,
-                    # blend the result with the original image using a blobby mask
-                    iaa.Add((-10, 10), per_channel=0.5), # change brightness of images (by -10 to 10 of original value)
-                    iaa.AddToHueAndSaturation((-20, 20)), # change hue and saturation
-                    # either change the brightness of the whole image (sometimes
-                    # per channel) or change the brightness of subareas
-                    iaa.OneOf([
-                        iaa.Multiply((0.5, 1.5), per_channel=0.5),
-                        iaa.FrequencyNoiseAlpha(
-                            exponent=(-4, 0),
-                            first=iaa.Multiply((0.5, 1.5), per_channel=True),
-                            second=iaa.ContrastNormalization((0.5, 2.0))
-                        )
-                    ]),
-                    iaa.ContrastNormalization((0.5, 2.0), per_channel=0.5), # improve or worsen the contrast
-                    iaa.Grayscale(alpha=(0.0, 1.0)),
-                    sometimes(iaa.PiecewiseAffine(scale=(0.01, 0.03))), # sometimes move parts of the image around
-                    sometimes(iaa.PerspectiveTransform(scale=(0.01, 0.1)))
-                ],
-                random_order=True
             ),
             iaa.Scale({"height": CROP_SIZE, "width": CROP_SIZE }),
         ],
@@ -452,9 +413,11 @@ class AccuracyReset(Callback):
         return
  
     def on_epoch_begin(self, epoch, logs={}):
+        self.epoch = epoch
         return
  
     def on_epoch_end(self, epoch, logs={}):
+        self.epoch = epoch
         return
  
     def on_batch_begin(self, batch, logs={}):
@@ -475,7 +438,7 @@ class AccuracyReset(Callback):
         self.last_accuracies_i = 0
         if group != -1 and save:
             self.model.save(
-                self.filepath.format(group= group ), 
+                self.filepath.format(group= group, epoch= epoch + 1), 
                 overwrite=True)
         return
 
@@ -641,13 +604,17 @@ if args.model:
 
     with CustomObjectScope({'HadamardClassifier': HadamardClassifier}):
         model = load_model(args.model, compile=False if not training or (args.learning_rate is not None) else True)
-    # e.g. DenseNet201_do0.3_doc0.0_avg-epoch128-val_acc0.964744.hdf5
-    match = re.search(r'(([a-zA-Z\d]+)_cs[,A-Za-z_\d\.]+)-epoch(\d+)-.*\.hdf5', args.model)
-    model_name = match.group(1)
-    args.classifier = match.group(2)
+    # e.g. ResNet50-hp-l2-ppavg2-losscategorical_crossentropy-cs256-nofc-doc0.0-do0.0-dol0.0-poolingnone-cas-epoch008-val_acc0.575105.hdf5
+    model_basename = os.path.splitext(os.path.basename(args.model))[0]
+    model_parts = model_basename.split('-')
+    model_name = '-'.join([part for part in model_parts if part not in ['epoch', 'val_acc']])
+    args.classifier = model_parts[0]
     CROP_SIZE = args.crop_size  = model.get_input_shape_at(0)[1]
     print("Overriding classifier: {} and crop size: {}".format(args.classifier, args.crop_size))
-    last_epoch = int(match.group(3))
+    last_epoch = int(list(filter(lambda x: x.startswith('epoch'), model_parts))[0][5:])
+    print("Last epoch: {}".format(last_epoch))
+    print("Model name: " + model_name)
+
     if args.learning_rate == None and training:
         dummy_model = model
         args.learning_rate = K.eval(model.optimizer.lr)
@@ -762,20 +729,20 @@ elif True:
     model = Model(inputs=(input_image), outputs=(prediction))
 
     model_name = args.classifier + \
-        ('_hp' if args.hadamard else '') + \
-        ('_l2' if args.l2_normalize else '_nol2' if args.hadamard else '') + \
-        ('_pp{}{}'.format(args.post_pooling, args.post_pool_size) if args.post_pooling else '') + \
-        '_loss{}'.format(args.loss) + \
-        '_cs{}'.format(args.crop_size) + \
-        ('_fc{}'.format(','.join([str(fc) for fc in args.fully_connected_layers])) if not args.no_fcs else '_nofc') + \
-        ('_bn' if args.batch_normalization else '') + \
-        (('_doc' + str(args.dropout_classifier)) if args.dropout_classifier != 0. else '') + \
-        (('_do'  + str(args.dropout)) if args.dropout != 0. else '') + \
-        (('_dol' + str(args.dropout_last)) if args.dropout_last != 0. else '') + \
-        '_' + args.pooling + \
-        ('_id' if args.include_distractors else '') + \
-        ('_cc{}'.format(','.join([str(c) for c in args.center_crops])) if args.center_crops else '') + \
-        ('_cas' if args.class_aware_sampling else '')
+        ('-hp' if args.hadamard else '') + \
+        ('-l2' if args.l2_normalize else '-nol2' if args.hadamard else '') + \
+        ('-pp{}{}'.format(args.post_pooling, args.post_pool_size) if args.post_pooling else '') + \
+        '-loss{}'.format(args.loss) + \
+        '-cs{}'.format(args.crop_size) + \
+        ('-fc{}'.format(','.join([str(fc) for fc in args.fully_connected_layers])) if not args.no_fcs else '-nofc') + \
+        ('-bn' if args.batch_normalization else '') + \
+        (('-doc' + str(args.dropout_classifier)) if args.dropout_classifier != 0. else '') + \
+        (('-do'  + str(args.dropout)) if args.dropout != 0. else '') + \
+        (('-dol' + str(args.dropout_last)) if args.dropout_last != 0. else '') + \
+        ('-pooling' + args.pooling) + \
+        ('-id' if args.include_distractors else '') + \
+        ('-cc{}'.format(','.join([str(c) for c in args.center_crops])) if args.center_crops else '') + \
+        ('-cas' if args.class_aware_sampling else '')
 
     print("Model name: " + model_name)
 
@@ -835,7 +802,7 @@ if training:
                         step_size=int(math.ceil(len(ids_train)  / args.batch_size)) * 1, mode='exp_range',
                         gamma=0.99994)
 
-    accuracy_callback = AccuracyReset(join(MODEL_FOLDER, model_name+"-group{group:03d}.hdf5"))
+    accuracy_callback = AccuracyReset(join(MODEL_FOLDER, model_name+"-epoch{epoch:03d}-group{group:03d}.hdf5"))
     callbacks = [save_checkpoint, accuracy_callback]
 
     if args.cyclic_learning_rate:
@@ -876,7 +843,7 @@ elif args.test or args.test_train:
     if args.test:
         all_ids  = all_test_ids
         jpgs_dir = TEST_DIR
-        results  = None
+        results  = defaultdict(dict)
     else:
         all_ids  = list(TRAIN_IDS)[:20000] # CHANGE
         jpgs_dir = TRAIN_DIR
