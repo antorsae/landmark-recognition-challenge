@@ -106,9 +106,12 @@ parser.add_argument('-vpc', '--val-percent', type=float, default=0.15, help='Val
 parser.add_argument('-cc', '--center-crops', nargs='*', type=int, default=[], help='Train on center crops only (not random crops) for the selected classes e.g. -cc 1 6 or all -cc -1')
 parser.add_argument('-ap', '--augmentation-probability', type=float, default=1., help='Probability of augmentation after 1st seen sample')
 parser.add_argument('-fcm', '--freeze-classifier', action='store_true', help='Freeze classifier weights (useful to fine-tune FC layers)')
+# training regime (class aware sampling options)
 parser.add_argument('-cas', '--class-aware-sampling', action='store_true', help='Use class aware sampling to balance dataset (instead of class weights)')
 parser.add_argument('-casac', '--class-aware-sampling-accuracy-target', type=float, default=0.9, help='Threshold to move to next landmark group (when using -cas)')
-parser.add_argument('-casp', '--class-aware-sampling-patience', type=int, default=8000, help='Patience in number of items to move to nexty landmark_to_cat (when using -cas)')
+parser.add_argument('-casab', '--class-aware-sampling-accuracy-batches', type=int, default=20, help='Number of batches to check for threshold to move to next landmark group (when using -cas)')
+parser.add_argument('-casp',  '--class-aware-sampling-patience', type=int, default=8000, help='Patience in number of items to move to nexty landmark_to_cat (when using -cas)')
+parser.add_argument('-casr', '--class-aware-sampling-resume', type=int, default=0, help='Resume from group, e.g. -casr 8 (group starts at 0)')
 
 # dataset (training)
 parser.add_argument('-id', '--include-distractors', action='store_true', help='Include distractors from retrieval challenge') # DO NOT USE YET
@@ -433,7 +436,11 @@ def process_item_worker(worker_id, lock, shared_mem_X, shared_mem_y, jobs, resul
 # Callback to monitor accuracy on a per-batch basis
 class AccuracyReset(Callback):
 
-    N_BATCHES = 20
+    N_BATCHES = args.class_aware_sampling_accuracy_batches
+
+    def __init__(self, filepath):
+        super(AccuracyReset, self).__init__()
+        self.filepath = filepath
 
     def on_train_begin(self, logs={}):
 
@@ -462,10 +469,14 @@ class AccuracyReset(Callback):
             self.accuracy_reached = True
         return
 
-    def reset_accuracy(self):
+    def reset_accuracy(self, group=-1, save = False):
         self.accuracy_reached = False
         self.last_accuracies = np.zeros(AccuracyReset.N_BATCHES)
         self.last_accuracies_i = 0
+        if group != -1 and save:
+            self.model.save(
+                self.filepath.format(group= group ), 
+                overwrite=True)
         return
 
 # main generator. Although predict=True mode works it is not used here.
@@ -498,6 +509,22 @@ def gen(items, batch_size, training=True, predict=False, accuracy_callback=None)
         classes_running_copy  = [ ]
         classes_seen = set()
         previous_classes_seen = set()
+        if args.class_aware_sampling_resume != 0:
+            # if resuming to group args.class_aware_sampling_resume:
+            for class_group in classes_groups[:args.class_aware_sampling_resume]:
+                # add classes from previous groups to previously seen classes
+                previous_classes_seen = previous_classes_seen.union(class_group)
+                # and for each class in group
+                for class_idx in class_group:
+                    # mark items up to worst case scenario (patience reached) as seen once so augmentation kicks in
+                    for item in items_per_class[class_idx][:args.class_aware_sampling_patience]:
+                        id_times_seen[get_id(item)] += 1
+            classes_current_group = (args.class_aware_sampling_resume - 1) % n_group_classes
+            print("Resuming from group {}. Landmarks marked as seen: {}".format(
+                classes_current_group,
+                " ".join([str(cat_to_landmark[cat]) for cat in previous_classes_seen])))
+        # dont save model the first time
+        save_model = False
 
     n_workers    = (cpu_count() - 1) if not predict else 1 # for prediction we need to guarantee order
     shared_mem_X = sharedmem.empty((n_workers, CROP_SIZE, CROP_SIZE, 3), dtype=np.float32)
@@ -529,14 +556,17 @@ def gen(items, batch_size, training=True, predict=False, accuracy_callback=None)
                         # if already reached patience or accuracy, build classes list with this group's classes
                         if classes_current_group_items_to_see == 0 or accuracy_callback.accuracy_reached:
                             print(accuracy_callback.last_accuracies)
-                            accuracy_callback.reset_accuracy()
+                            accuracy_callback.reset_accuracy(classes_current_group, save = save_model)
+                            # save model from now on
+                            save_model = True
                             classes_current_group_items_to_see = int(args.class_aware_sampling_patience * N_CLASSES / n_group_classes)
                             classes_current_group = (classes_current_group + 1) % n_group_classes
                             classes = list(classes_groups[classes_current_group])
                             classes_running_copy = []
                             previous_classes_seen = previous_classes_seen.union(classes_seen)
                             classes_seen = set()
-                            print("Class group {}/{} ({:.2f}% of items)".format(
+                            print("Class group #{} {}/{} ({:.2f}% of items)".format(
+                                classes_current_group, 
                                 classes_current_group+1, 
                                 n_group_classes,
                                 100. * sum([n_items_per_class[class_id] for class_id in previous_classes_seen.union(set(classes))]) / len(items),
@@ -625,7 +655,7 @@ if args.model:
 
     predictions_name = model.outputs[0].name
 
-elif not args.ensemble_models:
+elif True:
     if args.learning_rate is None:
         args.learning_rate = 1e-4   # default LR unless told otherwise
 
@@ -739,15 +769,13 @@ elif not args.ensemble_models:
         '_cs{}'.format(args.crop_size) + \
         ('_fc{}'.format(','.join([str(fc) for fc in args.fully_connected_layers])) if not args.no_fcs else '_nofc') + \
         ('_bn' if args.batch_normalization else '') + \
-        '_doc' + str(args.dropout_classifier) + \
-        '_do'  + str(args.dropout) + \
-        '_dol' + str(args.dropout_last) + \
+        (('_doc' + str(args.dropout_classifier)) if args.dropout_classifier != 0. else '') + \
+        (('_do'  + str(args.dropout)) if args.dropout != 0. else '') + \
+        (('_dol' + str(args.dropout_last)) if args.dropout_last != 0. else '') + \
         '_' + args.pooling + \
         ('_id' if args.include_distractors else '') + \
         ('_cc{}'.format(','.join([str(c) for c in args.center_crops])) if args.center_crops else '') + \
-        ('_nf' if args.no_flips else '') + \
-        ('_cas' if args.class_aware_sampling else '') + \
-        ('_mu' if args.mix_up else '') 
+        ('_cas' if args.class_aware_sampling else '')
 
     print("Model name: " + model_name)
 
@@ -807,7 +835,7 @@ if training:
                         step_size=int(math.ceil(len(ids_train)  / args.batch_size)) * 1, mode='exp_range',
                         gamma=0.99994)
 
-    accuracy_callback = AccuracyReset()
+    accuracy_callback = AccuracyReset(join(MODEL_FOLDER, model_name+"-group{group:03d}.hdf5"))
     callbacks = [save_checkpoint, accuracy_callback]
 
     if args.cyclic_learning_rate:
