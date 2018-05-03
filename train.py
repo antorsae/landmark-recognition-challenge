@@ -438,7 +438,7 @@ class AccuracyReset(Callback):
         self.last_accuracies_i = 0
         if group != -1 and save:
             self.model.save(
-                self.filepath.format(group= group, epoch= epoch + 1), 
+                self.filepath.format(group= group, epoch= self.epoch + 1), 
                 overwrite=True)
         return
 
