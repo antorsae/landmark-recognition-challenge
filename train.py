@@ -59,6 +59,8 @@ from hadamard import HadamardClassifier
 from clr_callback import CyclicLR
 from kerassurgeon.operations import delete_layer, insert_layer, delete_channels
 
+from extra import *
+
 SEED = 42
 
 np.random.seed(SEED)
@@ -99,6 +101,7 @@ parser.add_argument('-l2', '--l2-normalize', action='store_true', help='Perform 
 parser.add_argument('-pp', '--post-pooling', type=str, default=None, help='Add pooling layers after classifier, e.g. -pp avg|max')
 parser.add_argument('-pps', '--post-pool-size', type=int, default=2, help='Pooling factor for pooling layers after classifier, e.g. -pps 3')
 parser.add_argument('-dl', '--delete-layers', nargs='+', type=str, default=[], help='Specify layers to delete in classifier, e.g. -dl avg_pool')
+parser.add_argument('-nd', '--no-dense', action='store_true', help='Dont add any Dense layer at the end')
 
 # training regime
 parser.add_argument('-cs', '--crop-size', type=int, default=256, help='Crop size')
@@ -169,7 +172,8 @@ landmark_to_cat = { }
 cat_to_landmark = { }
 # since we may get holes in landmark (ids) from the CSV file
 # we'll use cat (category) starting from 0 and keep a few dicts to map around
-cat = 0
+#cat = -1
+max_landmark = -1
 with open(TRAIN_CSV, 'r') as csvfile:
     reader = csv.reader(csvfile, delimiter=',', quotechar='|')
     next(reader)
@@ -179,10 +183,11 @@ with open(TRAIN_CSV, 'r') as csvfile:
             if landmark in landmark_to_cat:
                 landmark_cat = landmark_to_cat[landmark]
             else:
-                landmark_cat = cat
+                max_landmark = max(max_landmark, landmark)
+                landmark_cat = landmark #cat
                 landmark_to_cat[landmark] = landmark_cat
-                cat_to_landmark[cat] = landmark
-                cat += 1 
+                cat_to_landmark[landmark_cat] = landmark
+                #cat += 1 
             id_to_landmark[idx] = landmark
             id_to_cat[idx]      = landmark_cat
             id_times_seen[idx]  = 0
@@ -191,7 +196,7 @@ with open(TRAIN_CSV, 'r') as csvfile:
 
 if args.include_distractors:
     landmark = -1
-    landmark_cat = cat
+    landmark_cat = landmark#cat
     landmark_to_cat[landmark] = landmark_cat
     cat_to_landmark[landmark_cat] = landmark
 
@@ -204,7 +209,9 @@ if args.include_distractors:
 
 N_CLASSES = len(landmark_to_cat.keys())
 
-print(len(id_to_landmark.keys()), N_CLASSES)
+print(len(id_to_landmark.keys()), N_CLASSES, max_landmark)
+assert N_CLASSES == (max_landmark +1)
+
 
 def get_class(item):
     return id_to_cat[os.path.splitext(os.path.basename(item))[0]]
@@ -262,6 +269,7 @@ def preprocess_image(img):
         'SEResNext'             : 'se_resnet',
         'SEResNextImageNet'     : 'se_resnet',
 
+        'ResNet152'             : 'resnet152',
     }
 
     if args.classifier in classifier_to_module:
@@ -717,7 +725,7 @@ elif True:
     if args.hadamard:
         # ignore unscaled logits for now (_)
         x, _ = HadamardClassifier(N_CLASSES, name= "logits", l2_normalize=args.l2_normalize, output_raw_logits=True)(x)
-    else:
+    elif not args.no_dense:
         x    = Dense(             N_CLASSES, name= "logits")(x)
 
     activation ="softmax" if args.loss == 'categorical_crossentropy' else "sigmoid"
@@ -742,7 +750,8 @@ elif True:
         ('-pooling' + args.pooling) + \
         ('-id' if args.include_distractors else '') + \
         ('-cc{}'.format(','.join([str(c) for c in args.center_crops])) if args.center_crops else '') + \
-        ('-cas' if args.class_aware_sampling else '')
+        ('-cas' if args.class_aware_sampling else '') + \
+        ('-nd' if args.no_dense else '')
 
     print("Model name: " + model_name)
 
