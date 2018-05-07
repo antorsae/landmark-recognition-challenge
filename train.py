@@ -270,6 +270,7 @@ def preprocess_image(img):
         'SEResNextImageNet'     : 'se_resnet',
 
         'ResNet152'             : 'resnet152',
+        'AResNet50'             : 'aresnet50',
     }
 
     if args.classifier in classifier_to_module:
