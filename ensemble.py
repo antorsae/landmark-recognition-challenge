@@ -32,7 +32,8 @@ parser.add_argument('-e', '--ensemble-csv', default='ensemble.csv', help='Ensemb
 args = parser.parse_args()
 preds = defaultdict(list)
 missing = set()
-max_scores = [0.] * len(args.csv_files)
+n_csvs = len(args.csv_files)
+max_scores = [0.] * n_csvs
 
 for i, csv_file in enumerate(args.csv_files):
     print("Reading {}".format(csv_file))
@@ -52,7 +53,7 @@ for i, csv_file in enumerate(args.csv_files):
 
 print(max_scores)
 ensemble = { }
-all_matches = some_matches = no_matches = 0
+missing_rows = all_matches = some_matches = no_matches = 0
    
 rows = 0     
 with open(args.ensemble_csv, 'w') as csvfile:
@@ -62,30 +63,31 @@ with open(args.ensemble_csv, 'w') as csvfile:
 
     for idx, predictions in preds.items():
         landmarks, scores = zip(*predictions)
+        # normalize scores between 0-1
         scores = [score/max_score for score,max_score in zip(scores, max_scores)]
+        # remove predictions with no landmark
         predictions = [(landmarks[i], scores[i]) for i,_landmark in enumerate(landmarks) if _landmark != None ]
+        if predictions == []:
+            continue
         landmarks, scores = zip(*predictions)
+        
+        landmark = most_common(landmarks)
+        landmark_scores   = [scores[i] for i,_landmark in enumerate(landmarks) if _landmark == landmark ]
+        n_agreements = landmarks.count(landmark)
 
-        if landmarks.count(landmarks[0]) == len(landmarks):
-            # all same
-            landmark = landmarks[0]
-            score    = max(scores)
-            if len(landmarks) == len(args.csv_files):
-                score += 2.
+        if n_agreements >= 2:
+            # agreement same
+            score    = max(landmark_scores) + n_agreements
+            if n_agreements == n_csvs:
                 all_matches += 1
             else:
-                score += 2.
-        elif len(set(landmarks)) == len(landmarks):
+                some_matches +=1 
+        else:
             # all different
             no_matches += 1
-            score    = max(scores)
+            score    = max(landmark_scores)
             landmark = landmarks[argmax(scores)]
-        else:
-            # some matches
-            some_matches += 1
-            landmark = most_common(landmarks)
-            scores   = [scores[i] for i,_landmark in enumerate(landmarks) if _landmark == landmark ]
-            score    = max(scores) + 1.
+
         ensemble[idx] = (landmark, score)
         csv_writer.writerow([idx, "{} {}".format(landmark, score)])
         rows += 1
@@ -93,11 +95,12 @@ with open(args.ensemble_csv, 'w') as csvfile:
     for idx in missing.difference(ensemble.keys()):
         csv_writer.writerow([idx, ""])
         rows += 1
+        missing_rows += 1
 
 
-print("Full/partial/no matches: {}/{}/{} {:.2f}%/{:.2f}%/{:.2f}%".format(
-    all_matches, some_matches, no_matches,
-    100. * all_matches/rows, 100. * some_matches / rows, 100. * no_matches /rows))
+print("Full/partial/no matches/missing: {}/{}/{}/{} {:.2f}%/{:.2f}%/{:.2f}%/{:.2f}%".format(
+    all_matches, some_matches, no_matches, missing_rows,
+    100. * all_matches/rows, 100. * some_matches / rows, 100. * no_matches /rows, 100. * missing_rows /rows))
     #csv_writer.writerow([idx, ""])
 
 print("kaggle competitions submit -f {} -m '{}'".format(
