@@ -51,11 +51,10 @@ for i, csv_file in enumerate(args.csv_files):
                 preds[idx].append((None, 0.))
                 missing.add(idx)              
 
-print(max_scores)
 ensemble = { }
-missing_rows = all_matches = some_matches = no_matches = 0
-   
-rows = 0     
+agreements = [0] * n_csvs
+
+missing_rows = rows = 0     
 with open(args.ensemble_csv, 'w') as csvfile:
 
     csv_writer = csv.writer(csvfile, delimiter=',',quotechar='|', quoting=csv.QUOTE_MINIMAL)
@@ -74,18 +73,13 @@ with open(args.ensemble_csv, 'w') as csvfile:
         landmark = most_common(landmarks)
         landmark_scores   = [scores[i] for i,_landmark in enumerate(landmarks) if _landmark == landmark ]
         n_agreements = landmarks.count(landmark)
-
+        agreements[n_csvs - n_agreements] += 1 
         if n_agreements >= 2:
             # agreement same
-            score    = max(landmark_scores) + n_agreements
-            if n_agreements == n_csvs:
-                all_matches += 1
-            else:
-                some_matches +=1 
+            score    = np.mean(landmark_scores) + n_agreements
         else:
             # all different
-            no_matches += 1
-            score    = max(landmark_scores)
+            score    = max(scores)
             landmark = landmarks[argmax(scores)]
 
         ensemble[idx] = (landmark, score)
@@ -97,14 +91,15 @@ with open(args.ensemble_csv, 'w') as csvfile:
         rows += 1
         missing_rows += 1
 
+voting_summary = ("Agreements: All/all except 1/all except 2/.../no agreements/missing: " + \
+    '/'.join(['{}'] * (n_csvs + 1)) + ' ' + '/'.join(['{:.2f}%'] * (n_csvs+1))).format(
+    *agreements, missing_rows,
+    *map(lambda x: 100.*x/rows, agreements), 100. * missing_rows/rows)
 
-print("Full/partial/no matches/missing: {}/{}/{}/{} {:.2f}%/{:.2f}%/{:.2f}%/{:.2f}%".format(
-    all_matches, some_matches, no_matches, missing_rows,
-    100. * all_matches/rows, 100. * some_matches / rows, 100. * no_matches /rows, 100. * missing_rows /rows))
-    #csv_writer.writerow([idx, ""])
+print(voting_summary)
 
-print("kaggle competitions submit -f {} -m '{}'".format(
+print("kaggle competitions submit -f {} -m '{} {}'".format(
     args.ensemble_csv,
-    ' '.join(sys.argv)
+    voting_summary, ' '.join(sys.argv)
     ))
         
