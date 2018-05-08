@@ -140,7 +140,7 @@ def get_available_gpus():
 if args.gpus is None:
     args.gpus = len(get_available_gpus())   
 
-args.batch_size *= args.gpus
+args.batch_size *= max(args.gpus, 1)
 
 TRAIN_DIR    = 'train-dl'
 TRAIN_JPGS   = set(Path(TRAIN_DIR).glob('*.jpg'))
@@ -271,6 +271,7 @@ def preprocess_image(img):
 
         'ResNet152'             : 'resnet152',
         'AResNet50'             : 'aresnet50',
+        'AXception'             : 'axception',
     }
 
     if args.classifier in classifier_to_module:
@@ -855,7 +856,7 @@ elif args.test or args.test_train:
         jpgs_dir = TEST_DIR
         results  = defaultdict(dict)
     else:
-        all_ids  = list(TRAIN_IDS)[:20000] # CHANGE
+        all_ids  = list(TRAIN_IDS)#[:20000] # CHANGE
         jpgs_dir = TRAIN_DIR
         results  = defaultdict(dict)
 
@@ -876,6 +877,7 @@ elif args.test or args.test_train:
                 predictions, logits = model.predict(imgs[:batch_id])
                 cats = np.argmax(predictions, axis=1)
                 for i, (cat, logit, _idx) in enumerate(zip(cats, logits, batch_idx)):
+                    order = np.argsort(logit)
                     score = predictions[i, cat]
                     landmark = cat_to_landmark[cat]
                     if results is not None:
