@@ -119,7 +119,7 @@ parser.add_argument('-casp',  '--class-aware-sampling-patience', type=int, defau
 parser.add_argument('-casr', '--class-aware-sampling-resume', type=int, default=0, help='Resume from group, e.g. -casr 8 (group starts at 0)')
 
 # dataset (training)
-parser.add_argument('-id', '--include-distractors', action='store_true', help='Include distractors from retrieval challenge') # DO NOT USE YET
+parser.add_argument('-id', '--include-distractors', action='store_true', help='Include distractors')
 
 # test
 parser.add_argument('-t', '--test', action='store_true', help='Test model and generate CSV/npy submission file')
@@ -136,7 +136,11 @@ if not args.verbose:
 
 if args.hadamard:
     args.no_fcs = True
-    print("Info: auto-setting -no-fcs because using Hadamard projection")
+    print("Info: auto-setting --no-fcs because --hadamard")
+
+if args.include_distractors:
+    args.freeze_classifier = True
+    print("Info: auto-setting --freeze_classifier because --include-distractors")
 
 from tensorflow.python.client import device_lib
 def get_available_gpus():
@@ -200,6 +204,8 @@ with open(TRAIN_CSV, 'r') as csvfile:
             landmark_to_ids[landmark].append(idx)
             cat_to_ids[landmark_cat].append(idx)
 
+N_CLASSES = len(landmark_to_cat.keys())
+
 if args.include_distractors:
     landmark = -1
     landmark_cat = landmark#cat
@@ -213,11 +219,8 @@ if args.include_distractors:
         landmark_to_ids[landmark].append(idx)
         cat_to_ids[landmark_cat].append(idx)
 
-N_CLASSES = len(landmark_to_cat.keys())
-
 print(len(id_to_landmark.keys()), N_CLASSES, max_landmark)
 assert N_CLASSES == (max_landmark +1)
-
 
 def get_class(item):
     return id_to_cat[os.path.splitext(os.path.basename(item))[0]]
@@ -387,7 +390,8 @@ def process_item(item, aug = False, training = False, predict=False):
         print("ap: ", img.shape, item)
 
     if not predict:
-        one_hot_class_idx = to_categorical(get_class(item), N_CLASSES)
+        _class = get_class(item)
+        one_hot_class_idx = to_categorical(_class, N_CLASSES) if _class != -1 else np.ones(N_CLASSES, dtype=np.float32)
     else:
         one_hot_class_idx = np.zeros(N_CLASSES, dtype=np.float32)
 
@@ -472,9 +476,11 @@ def gen(items, batch_size, training=True, predict=False, accuracy_callback=None)
 
     # class index
     y = np.empty((batch_size, N_CLASSES),               dtype=np.float32)
+    if args.include_distractors:
+        d = np.empty((batch_size),                      dtype=np.float32)
     
     n_group_classes = int(math.ceil(N_CLASSES / batch_size))
-    if training and args.class_aware_sampling:
+    if training and (args.class_aware_sampling):
         items_per_class = defaultdict(list)
         n_items_per_class = np.zeros(N_CLASSES, dtype=np.int64)
         for item in items:
@@ -573,8 +579,16 @@ def gen(items, batch_size, training=True, predict=False, accuracy_callback=None)
                     classes_seen.add(random_class)
                 else:
                     # if not using class-aware sampling, just pick one item
-                    item = items[i % len(items)]
-                    i += 1
+                    pick_distractor =  np.random.random() <= 0.5
+                    if args.include_distractors:
+                        while True:
+                            item = items[i % len(items)]
+                            i += 1
+                            if (get_class(item) == -1 and pick_distractor) or (get_class(item) != -1 and not pick_distractor):
+                                break
+                    else:
+                        item = items[i % len(items)]
+                        i += 1
                 if not predict:
                     # do not augment the first time the net has seen an item
                     aug = False if id_times_seen[get_id(item)] == 0 else True
@@ -593,6 +607,8 @@ def gen(items, batch_size, training=True, predict=False, accuracy_callback=None)
 
                 if is_good_item:
                     X[batch_idx], y[batch_idx] = shared_mem_X[worker_id], shared_mem_y[worker_id]
+                    if args.include_distractors:
+                        d[batch_idx] = 1 if np.all(shared_mem_y[worker_id] == 1.) else 0
                     locks[worker_id].release()
                     batch_idx += 1
                 else:
@@ -604,7 +620,7 @@ def gen(items, batch_size, training=True, predict=False, accuracy_callback=None)
 
                 if batch_idx == batch_size:
                     if not predict:
-                        yield(X, y)
+                        yield(X, y if not args.include_distractors else d)
                     else:
                         yield(X)
                     batch_idx = 0
@@ -660,15 +676,7 @@ elif True:
     if 'bottleneck_features' in classifier_args:
         kwargs['bottleneck_features'] = args.bottleneck_features
 
-    if True:
-        classifier_model = classifier(**kwargs)
-    else:
-        classifier_model = classifier(
-            include_top=False, 
-            weights = 'imagenet' if args.use_imagenet_weights else None,
-            input_shape=(CROP_SIZE, CROP_SIZE, 3), 
-            pooling=args.pooling if args.pooling != 'none' else None,
-            **extra_kwargs)
+    classifier_model = classifier(**kwargs)
 
     for layer in args.delete_layers:
         classifier_model = delete_layer(classifier_model, classifier_model.get_layer(layer))
@@ -748,17 +756,29 @@ elif True:
 
     if args.hadamard:
         # ignore unscaled logits for now (_)
-        x, _ = HadamardClassifier(N_CLASSES, name= "logits", l2_normalize=args.l2_normalize, output_raw_logits=True)(x)
+        x, logits = HadamardClassifier(N_CLASSES, name= "logits", l2_normalize=args.l2_normalize, output_raw_logits=True)(x)
     elif not args.no_dense:
-        x    = Dense(             N_CLASSES, name= "logits")(x)
+        x         = Dense(             N_CLASSES, name= "logits")(x)
 
     activation ="softmax" if args.loss == 'categorical_crossentropy' else "sigmoid"
 
-    print("Using {} activation and {} loss for predictions". format(activation, args.loss))
+    print("Using {} activation and {} loss for predictions". format(activation, args.loss))          
 
     prediction = Activation(activation, name="predictions")(x)
 
-    model = Model(inputs=(input_image), outputs=(prediction))
+    if args.include_distractors:
+        d = logits
+        for features in [1024,512,256,128]:
+                d = Dense(features,    name= 'd_fc{}'.format(features))(d)
+                d = BatchNormalization(name= 'bn_m{}'.format(features))(d)
+                d = Activation(args.fully_connected_activation,
+                    name= 'act_m{}{}'.format(args.fully_connected_activation,features))(d)
+        distractor = Dense(   1, activation='sigmoid', name='distractors')(d)
+
+    model = Model(inputs=(input_image), outputs=(prediction) if not args.include_distractors else (distractor))
+
+    if args.include_distractors:
+        model.get_layer('logits').trainable = False
 
     model_name = args.classifier + \
         ('-hp' if args.hadamard else '') + \
@@ -780,11 +800,11 @@ elif True:
     print("Model name: " + model_name)
 
     if args.weights:
-            model.load_weights(args.weights, by_name=True, skip_mismatch=True)
-            match = re.search(r'([,A-Za-z_\d\.]+)-epoch(\d+)-.*\.hdf5', args.weights)
-            last_epoch = int(match.group(2))
+        print("Loading weights from {}".format(args.weights))
+        model.load_weights(args.weights, by_name=True, skip_mismatch=True)
+        match = re.search(r'([,A-Za-z_\d\.]+)-epoch(\d+)-.*\.hdf5', args.weights)
+        last_epoch = int(match.group(2))        
 
-model.summary()
 model = multi_gpu_model(model, gpus=args.gpus)
 
 if training:
@@ -814,29 +834,41 @@ if training:
                 for classifier_layer in layer.layers:
                     classifier_layer.trainable = False
 
-    loss = { 'predictions' : args.loss} 
+    model.summary()
+
+    if args.include_distractors:
+        loss = { 'distractors' : args.loss} 
+    else:
+        loss = { 'predictions' : args.loss} 
 
     model.compile(optimizer=opt, 
         loss=loss, 
-        metrics={ 'predictions': ['categorical_accuracy']},
+        metrics={ 'predictions': ['categorical_accuracy'], 'distractors': ['binary_accuracy']},
         )
 
-    metric  = "-val_acc{val_categorical_accuracy:.6f}"
-    monitor = "val_categorical_accuracy"
+    if not args.include_distractors:
+        metric  = "-val_acc{val_categorical_accuracy:.6f}"
+        monitor = "val_categorical_accuracy"
+    else:
+        metric  = "-val_acc{val_binary_accuracy:.4f}"
+        monitor = "val_binary_accuracy"
 
     save_checkpoint = ModelCheckpoint(
             join(MODEL_FOLDER, model_name+"-epoch{epoch:03d}"+metric+".hdf5"),
             monitor=monitor,
             verbose=0,  save_best_only=True, save_weights_only=False, mode='max', period=1)
 
-    reduce_lr = ReduceLROnPlateau(monitor=monitor, factor=0.2, patience=5, min_lr=1e-9, epsilon = 0.00001, verbose=1, mode='max')
+    reduce_lr = ReduceLROnPlateau(monitor=monitor, factor=0.1, patience=2, min_lr=1e-9, epsilon = 0.00001, verbose=1, mode='max')
     
-    clr = CyclicLR(base_lr=args.learning_rate*4, max_lr=args.learning_rate,
+    clr = CyclicLR(base_lr=args.learning_rate/4, max_lr=args.learning_rate,
                         step_size=int(math.ceil(len(ids_train)  / args.batch_size)) * 1, mode='exp_range',
                         gamma=0.99994)
 
     accuracy_callback = AccuracyReset(join(MODEL_FOLDER, model_name+"-epoch{epoch:03d}-group{group:03d}.hdf5"))
-    callbacks = [save_checkpoint, accuracy_callback]
+    callbacks = [save_checkpoint]
+
+    if args.class_aware_sampling:
+        callbacks.append(accuracy_callback)
 
     if args.cyclic_learning_rate:
         callbacks.append(clr)
@@ -853,7 +885,7 @@ if training:
             epochs = args.max_epoch,
             callbacks = callbacks,
             initial_epoch = last_epoch,
-            class_weight={  'predictions': class_weight } if not args.class_aware_sampling else None)
+            class_weight={  'predictions': class_weight } if ((not args.class_aware_sampling) and (not args.include_distractors)) else None)
 
 elif args.test or args.test_train:
 
