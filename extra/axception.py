@@ -48,7 +48,8 @@ TF_WEIGHTS_PATH_NO_TOP = 'https://github.com/fchollet/deep-learning-models/relea
 def AXception(include_top=True, weights='imagenet',
              input_tensor=None, input_shape=None,
              pooling=None,
-             classes=1000):
+             classes=1000,
+             bottleneck_features = 2048):
     """Instantiates the Xception architecture.
 
     Optionally loads weights pre-trained on ImageNet. This model can
@@ -218,8 +219,6 @@ def AXception(include_top=True, weights='imagenet',
     x = SeparableConv2D(1536, (3, 3), padding='same', use_bias=False, name='block14_sepconv1')(x)
     x = BatchNormalization(name='block14_sepconv1_bn')(x)
     x = Activation('relu', name='block14_sepconv1_act')(x)
-
-    bottleneck_features = 2048 if False else 16384
 
     x = SeparableConv2D(bottleneck_features, (3, 3), padding='same', use_bias=False, name='block14_sepconv2')(x)
     x = BatchNormalization(name='block14_sepconv2_bn')(x)

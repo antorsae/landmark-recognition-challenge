@@ -60,6 +60,7 @@ from clr_callback import CyclicLR
 from kerassurgeon.operations import delete_layer, insert_layer, delete_channels
 
 from extra import *
+import inspect
 
 SEED = 42
 
@@ -102,6 +103,7 @@ parser.add_argument('-pp', '--post-pooling', type=str, default=None, help='Add p
 parser.add_argument('-pps', '--post-pool-size', type=int, default=2, help='Pooling factor for pooling layers after classifier, e.g. -pps 3')
 parser.add_argument('-dl', '--delete-layers', nargs='+', type=str, default=[], help='Specify layers to delete in classifier, e.g. -dl avg_pool')
 parser.add_argument('-nd', '--no-dense', action='store_true', help='Dont add any Dense layer at the end')
+parser.add_argument('-bf', '--bottleneck-features', type=int, default=16384, help='If classifier supports it, override number of bottleneck feautures (typically 2048)')
 
 # training regime
 parser.add_argument('-cs', '--crop-size', type=int, default=256, help='Crop size')
@@ -131,6 +133,10 @@ training = not (args.test or args.test_train)
 if not args.verbose:
     import warnings
     warnings.filterwarnings("ignore")
+
+if args.hadamard:
+    args.no_fcs = True
+    print("Info: auto-setting -no-fcs because using Hadamard projection")
 
 from tensorflow.python.client import device_lib
 def get_available_gpus():
@@ -642,11 +648,27 @@ elif True:
 
     classifier = globals()[args.classifier]
 
-    classifier_model = classifier(
-        include_top=False, 
-        weights = 'imagenet' if args.use_imagenet_weights else None,
-        input_shape=(CROP_SIZE, CROP_SIZE, 3), 
-        pooling=args.pooling if args.pooling != 'none' else None)
+    kwargs = { \
+        'include_top' : False,
+        'weights'     : 'imagenet' if args.use_imagenet_weights else None,
+        'input_shape' : (CROP_SIZE, CROP_SIZE, 3), 
+        'pooling'     : args.pooling if args.pooling != 'none' else None,
+     }
+
+    classifier_args, _, _, _ = inspect.getargspec(classifier)
+
+    if 'bottleneck_features' in classifier_args:
+        kwargs['bottleneck_features'] = args.bottleneck_features
+
+    if True:
+        classifier_model = classifier(**kwargs)
+    else:
+        classifier_model = classifier(
+            include_top=False, 
+            weights = 'imagenet' if args.use_imagenet_weights else None,
+            input_shape=(CROP_SIZE, CROP_SIZE, 3), 
+            pooling=args.pooling if args.pooling != 'none' else None,
+            **extra_kwargs)
 
     for layer in args.delete_layers:
         classifier_model = delete_layer(classifier_model, classifier_model.get_layer(layer))

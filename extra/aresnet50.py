@@ -129,7 +129,8 @@ def conv_block(input_tensor, kernel_size, filters, stage, block, strides=(2, 2))
 def AResNet50(include_top=True, weights='imagenet',
              input_tensor=None, input_shape=None,
              pooling=None,
-             classes=1000):
+             classes=1000,
+             bottleneck_features = 2048):
     """Instantiates the ResNet50 architecture.
 
     Optionally loads weights pre-trained
@@ -236,10 +237,10 @@ def AResNet50(include_top=True, weights='imagenet',
     x = identity_block(x, 3, [512, 512, 2048], stage=5, block='b')
     x = identity_block(x, 3, [512, 512, 2048], stage=5, block='c')
 
-    if True:
-        x = conv_block(x, 3, [1024, 1024, 16384], stage=6, block='a')
-        x = identity_block(x, 3, [1024, 1024, 16384], stage=6, block='b')
-        x = identity_block(x, 3, [1024, 1024, 16384], stage=6, block='c')
+    if bottleneck_features != 2048:
+        x = conv_block(x, 3, [1024, 1024, bottleneck_features], stage=6, block='a')
+        x = identity_block(x, 3, [1024, 1024, bottleneck_features], stage=6, block='b')
+        x = identity_block(x, 3, [1024, 1024, bottleneck_features], stage=6, block='c')
 
     #x = AveragePooling2D((7, 7), name='avg_pool')(x)
     #x = GlobalAveragePooling2D(name='avg_pool')(x)

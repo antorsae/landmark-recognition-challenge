@@ -151,7 +151,8 @@ def conv_block(input_tensor, kernel_size, filters, stage, block, strides=(2, 2))
 def ResNet152(include_top, 
         weights,
         input_shape, 
-        pooling):
+        pooling,
+        bottleneck_features=16384):
     '''Instantiate the ResNet152 architecture,
     # Arguments
         weights_path: path to pretrained weight file
@@ -189,10 +190,10 @@ def ResNet152(include_top,
     x = identity_block(x, 3, [512, 512, 2048], stage=5, block='c')
 
     # new
-    if True:
-        x = conv_block(x, 3, [1024, 1024, 16384], stage=6, block='a')
-        x = identity_block(x, 3, [1024, 1024, 16384], stage=6, block='b')
-        x = identity_block(x, 3, [1024, 1024, 16384], stage=6, block='c')
+    if bottleneck_features != 2048:
+        x = conv_block(x, 3, [1024, 1024, bottleneck_features], stage=6, block='a')
+        x = identity_block(x, 3, [1024, 1024, bottleneck_features], stage=6, block='b')
+        x = identity_block(x, 3, [1024, 1024, bottleneck_features], stage=6, block='c')
 
     #x = AveragePooling2D((7, 7), name='avg_pool')(x)
     x = GlobalAveragePooling2D(name='avg_pool')(x)
