@@ -54,7 +54,7 @@ for i, csv_file in enumerate(args.csv_files):
 ensemble = { }
 agreements = [0] * n_csvs
 
-missing_rows = rows = 0     
+distractors = missing_rows = rows = 0     
 with open(args.ensemble_csv, 'w') as csvfile:
 
     csv_writer = csv.writer(csvfile, delimiter=',',quotechar='|', quoting=csv.QUOTE_MINIMAL)
@@ -82,19 +82,24 @@ with open(args.ensemble_csv, 'w') as csvfile:
             score    = max(scores)
             landmark = landmarks[argmax(scores)]
 
-        ensemble[idx] = (landmark, score)
-        csv_writer.writerow([idx, "{} {}".format(landmark, score)])
-        rows += 1
+        if landmark != 15000:
+            ensemble[idx] = (landmark, score)
+            csv_writer.writerow([idx, "{} {}".format(landmark, score)])
+            rows += 1
+        else:
+            distractors += 1
+            missing.add(idx)              
+
     # missing test items
     for idx in missing.difference(ensemble.keys()):
         csv_writer.writerow([idx, ""])
         rows += 1
         missing_rows += 1
 
-voting_summary = ("Agreements: All/all except 1/all except 2/.../no agreements/missing: " + \
-    '/'.join(['{}'] * (n_csvs + 1)) + ' ' + '/'.join(['{:.2f}%'] * (n_csvs+1))).format(
-    *agreements, missing_rows,
-    *map(lambda x: 100.*x/rows, agreements), 100. * missing_rows/rows)
+voting_summary = ("Agreements: All/all except 1/all except 2/.../no agreements/missing/distractors: " + \
+    '/'.join(['{}'] * (n_csvs + 2)) + ' ' + '/'.join(['{:.2f}%'] * (n_csvs+2))).format(
+    *agreements, missing_rows, distractors,
+    *map(lambda x: 100.*x/rows, agreements), 100. * missing_rows/rows, 100. * distractors/rows)
 
 print(voting_summary)
 
