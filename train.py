@@ -237,11 +237,10 @@ print(len(ids_to_dup))
 TRAIN_JPGS = list(TRAIN_JPGS) + ids_to_dup 
 
 if args.include_distractors:
-    TRAIN_JPGS += DISTRACTOR_JPGS
 
-    print("Total items in set {} of which {:.2f}% are distractors".format(
-        len(TRAIN_JPGS), 
-        100. * len(DISTRACTOR_JPGS) / len(TRAIN_JPGS)))
+    print("Total items {} of which {:.2f}% are distractors".format(
+        len(TRAIN_JPGS) + len(DISTRACTOR_JPGS), 
+        100. * len(DISTRACTOR_JPGS) / (len(TRAIN_JPGS) + len(DISTRACTOR_JPGS))))
 else:
     print("Total items in set {}".format(
         len(TRAIN_JPGS), ))
@@ -620,7 +619,8 @@ def gen(items, batch_size, training=True, predict=False, accuracy_callback=None)
 
                 if batch_idx == batch_size:
                     if not predict:
-                        yield(X, y if not args.include_distractors else d)
+                        _Y = y if not args.include_distractors else [y,d]
+                        yield(X, _Y)
                     else:
                         yield(X)
                     batch_idx = 0
@@ -630,11 +630,14 @@ def gen(items, batch_size, training=True, predict=False, accuracy_callback=None)
         if len(bad_items) > 0:
             print("\nRejected {} items: {}".format('trainining' if training else 'validation', len(bad_items)))
 
+def zero_loss(y_true, y_pred):
+    return  K.zeros(shape=(1,))
+
 # MAIN
 if args.model:
     print("Loading model " + args.model)
 
-    with CustomObjectScope({'HadamardClassifier': HadamardClassifier}):
+    with CustomObjectScope({'HadamardClassifier': HadamardClassifier, 'zero_loss': zero_loss}):
         model = load_model(args.model, compile=False if not training or (args.learning_rate is not None) else True)
     # e.g. ResNet50-hp-l2-ppavg2-losscategorical_crossentropy-cs256-nofc-doc0.0-do0.0-dol0.0-poolingnone-cas-epoch008-val_acc0.575105.hdf5
     model_basename = os.path.splitext(os.path.basename(args.model))[0]
@@ -760,11 +763,9 @@ elif True:
     elif not args.no_dense:
         x         = Dense(             N_CLASSES, name= "logits")(x)
 
-    activation ="softmax" if args.loss == 'categorical_crossentropy' else "sigmoid"
+    #print("Using {} activation and {} loss for predictions". format(activation, args.loss))          
 
-    print("Using {} activation and {} loss for predictions". format(activation, args.loss))          
-
-    prediction = Activation(activation, name="predictions")(x)
+    prediction = Activation(activation ="softmax", name="predictions")(x)
 
     if args.include_distractors:
         d = logits
@@ -775,7 +776,7 @@ elif True:
                     name= 'act_m{}{}'.format(args.fully_connected_activation,features))(d)
         distractor = Dense(   1, activation='sigmoid', name='distractors')(d)
 
-    model = Model(inputs=(input_image), outputs=(prediction) if not args.include_distractors else (distractor))
+    model = Model(inputs=[input_image], outputs=prediction if not args.include_distractors else [prediction, distractor])
 
     if args.include_distractors:
         model.get_layer('logits').trainable = False
@@ -805,13 +806,21 @@ elif True:
         match = re.search(r'([,A-Za-z_\d\.]+)-epoch(\d+)-.*\.hdf5', args.weights)
         last_epoch = int(match.group(2))        
 
-model = multi_gpu_model(model, gpus=args.gpus)
-
 if training:
 
     # split train/val using stratification
     ids_train, ids_val, _, _ = train_test_split(
         TRAIN_JPGS, TRAIN_CATS, test_size=args.val_percent, random_state=SEED, stratify=TRAIN_CATS)
+
+    if args.include_distractors:
+        n_distractor_val_split = int(len(DISTRACTOR_JPGS) / 2)
+        ids_val.extend(DISTRACTOR_JPGS[:n_distractor_val_split])
+        ids_train.extend(DISTRACTOR_JPGS[n_distractor_val_split:])
+        print('Using {:.2f}% distractor items in val split'.format(100. * n_distractor_val_split / len(ids_val)))
+        print('Using {:.2f}% distractor items in train split'.format(100. * (len(DISTRACTOR_JPGS) - n_distractor_val_split) / len(ids_train)))
+        random.shuffle(ids_train)
+        random.shuffle(ids_val)
+        print("Train split: {} Valid split {}".format(len(ids_train), len(ids_val)))
 
     # compute class weight if not using class-aware sampling
     classes_train = [get_class(idx) for idx in ids_train]
@@ -837,14 +846,18 @@ if training:
     model.summary()
 
     if args.include_distractors:
-        loss = { 'distractors' : args.loss} 
+        loss = { 'predictions' : zero_loss, 'distractors' : args.loss} 
     else:
         loss = { 'predictions' : args.loss} 
+
+    model = multi_gpu_model(model, gpus=args.gpus)
 
     model.compile(optimizer=opt, 
         loss=loss, 
         metrics={ 'predictions': ['categorical_accuracy'], 'distractors': ['binary_accuracy']},
         )
+
+
 
     if not args.include_distractors:
         metric  = "-val_acc{val_categorical_accuracy:.6f}"
