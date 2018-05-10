@@ -82,7 +82,7 @@ with open(args.ensemble_csv, 'w') as csvfile:
             score    = max(scores)
             landmark = landmarks[argmax(scores)]
 
-        if landmark != 15000:
+        if (landmark != 15000) and (landmark != -1):
             ensemble[idx] = (landmark, score)
             csv_writer.writerow([idx, "{} {}".format(landmark, score)])
             rows += 1
