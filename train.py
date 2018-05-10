@@ -25,6 +25,7 @@ import keras.losses
 from keras.utils import CustomObjectScope
 
 from multi_gpu_keras import multi_gpu_model
+#from keras.utils import multi_gpu_model
 
 import skimage
 from iterm import show_image
@@ -280,6 +281,7 @@ def preprocess_image(img):
         'ResNet152'             : 'resnet152',
         'AResNet50'             : 'aresnet50',
         'AXception'             : 'axception',
+        'AInceptionV3'          : 'ainceptionv3',
     }
 
     if args.classifier in classifier_to_module:
@@ -655,8 +657,6 @@ if args.model:
         args.learning_rate = K.eval(model.optimizer.lr)
         print("Resuming with learning rate: {:.2e}".format(args.learning_rate))
 
-    predictions_name = model.outputs[0].name
-
 elif True:
     if args.learning_rate is None:
         args.learning_rate = 1e-4   # default LR unless told otherwise
@@ -776,7 +776,7 @@ elif True:
                     name= 'act_m{}{}'.format(args.fully_connected_activation,features))(d)
         distractor = Dense(   1, activation='sigmoid', name='distractors')(d)
 
-    model = Model(inputs=[input_image], outputs=prediction if not args.include_distractors else [prediction, distractor])
+    model = Model(inputs=input_image, outputs=prediction if not args.include_distractors else (prediction, distractor))
 
     if args.include_distractors:
         model.get_layer('logits').trainable = False
@@ -839,7 +839,6 @@ if training:
         for layer in model.layers:
             if isinstance(layer, Model):
                 print("Freezing weights for classifier {}".format(layer.name))
-                print(layer)
                 for classifier_layer in layer.layers:
                     classifier_layer.trainable = False
 
@@ -900,9 +899,8 @@ if training:
 
 elif args.test or args.test_train:
 
-    # build model with two outputs, regular one plus unscaled logits from hadamard classifier
-    # FIX: this will fail if not using hadamard
-    model = Model(inputs=model.input, outputs=model.outputs + [model.get_layer('logits').output[1]])
+    
+    has_distractor_head = True if len(model.outputs) > 1 else False
     model.summary()
 
     if args.test:
@@ -919,11 +917,9 @@ elif args.test or args.test_train:
     if args.test:
         all_ids  = all_test_ids
         jpgs_dir = TEST_DIR
-        results  = defaultdict(dict)
     else:
         all_ids  = list(TRAIN_IDS)#[:20000] # CHANGE
         jpgs_dir = TRAIN_DIR
-        results  = defaultdict(dict)
 
     with Pool(min(args.batch_size, cpu_count())) as pool:
         process_item_func  = partial(process_item, predict = True)
@@ -939,16 +935,20 @@ elif args.test or args.test_train:
             batch_idx = [ ]
 
             def predict_minibatch():
-                predictions, logits = model.predict(imgs[:batch_id])
+                if has_distractor_head:
+                    predictions, distractors = model.predict(imgs[:batch_id])
+                else:
+                    predictions              = model.predict(imgs[:batch_id])
+                    distractors = predictions # hack to avoid code dup
+
                 cats = np.argmax(predictions, axis=1)
-                for i, (cat, logit, _idx) in enumerate(zip(cats, logits, batch_idx)):
-                    order = np.argsort(logit)
+                for i, (cat, distractor, _idx) in enumerate(zip(cats, distractors, batch_idx)):
                     score = predictions[i, cat]
                     landmark = cat_to_landmark[cat]
-                    if results is not None:
-                        results[landmark][idx] = logit
-                    #np.save(Path('logits') / idx, logit)
-                    if (score >= args.threshold) and (landmark != -1):
+                    is_distractor = False
+                    if has_distractor_head and distractor >= 0.5:
+                        landmark = -1 
+                    if (score >= args.threshold):
                         csv_writer.writerow([_idx, "{} {}".format(landmark, score)])
                     else:
                         csv_writer.writerow([_idx, ""])    
@@ -979,10 +979,6 @@ elif args.test or args.test_train:
             # predict remaining items (if any)
             if batch_id != 0:
                 predict_minibatch()
-
-    if results is not None:
-        for landmark, dict_idx_logits in tqdm(results.items()):
-            np.savez(Path('logits') / str(landmark), **dict_idx_logits)
 
 
 
