@@ -857,14 +857,12 @@ if training:
         metrics={ 'predictions': ['categorical_accuracy'], 'distractors': ['binary_accuracy']},
         )
 
-
-
     if not args.include_distractors:
         metric  = "-val_acc{val_preditions_categorical_accuracy:.6f}"
-        monitor = "val_categorical_accuracy"
+        monitor = "val_preditions_categorical_accuracy"
     else:
         metric  = "-val_acc{val_distractors_binary_accuracy:.4f}"
-        monitor = "val_binary_accuracy"
+        monitor = "val_distractors_binary_accuracy"
 
     save_checkpoint = ModelCheckpoint(
             join(MODEL_FOLDER, model_name+"-epoch{epoch:03d}"+metric+".hdf5"),
