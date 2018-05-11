@@ -1,3 +1,4 @@
+from __future__ import absolute_import
 import keras
 from keras import backend as K
 from keras.applications.vgg16 import VGG16, preprocess_input
@@ -12,7 +13,8 @@ def VGG16PlacesHybrid1365(include_top=True,
                           classes=1365,
                           **kwargs):
 
-    model = VGG16(weights=None, classes=classes, **kwargs)
+    model = VGG16(
+        weights=None, classes=classes, include_top=include_top, **kwargs)
 
     if weights:
         if include_top:
