@@ -121,7 +121,9 @@ parser.add_argument('-casr', '--class-aware-sampling-resume', type=int, default=
 
 # dataset (training)
 parser.add_argument('-id', '--include-distractors', action='store_true', help='Include distractors')
+parser.add_argument('-p1365', '--vgg-places', action='store_true', help='Use VGG16PlacesHybrid1365 features for distractor training')
 
+VGG16PlacesHybrid1365
 # test
 parser.add_argument('-t', '--test', action='store_true', help='Test model and generate CSV/npy submission file')
 parser.add_argument('-tt', '--test-train', action='store_true', help='Test model on the training set')
@@ -168,7 +170,9 @@ TRAIN_CSV           = 'train.csv'
 TEST_CSV            = 'test.csv'
 
 if args.include_distractors:
-    DISTRACTOR_JPGS   = list(Path('distractors').glob('*.jpg'))
+    NON_LANDMARK_DISTRACTOR_JPGS = list(Path('distractors').glob('*.jpg'))
+    LANDMARK_DISTRACTOR_JPGS     = list(Path('../landmark-retrieval-challenge/train').glob('*.jpg'))[:len(NON_LANDMARK_DISTRACTOR_JPGS)]
+    DISTRACTOR_JPGS = NON_LANDMARK_DISTRACTOR_JPGS + LANDMARK_DISTRACTOR_JPGS
     DISTRACTOR_IDS    = { os.path.splitext(os.path.basename(item))[0] for item in DISTRACTOR_JPGS }
 
 CROP_SIZE = args.crop_size
@@ -771,6 +775,10 @@ elif True:
 
     if args.include_distractors:
         d = logits
+        if args.vgg_places:
+            places_features = VGG16PlacesHybrid1365(include_top=False, pooling='avg')(input_image)
+            #places_features = GlobalAveragePooling2D()(places_features)
+            d = concatenate([d, places_features])
         for features in [1024,512,256,128]:
                 d = Dense(features,    name= 'd_fc{}'.format(features))(d)
                 d = BatchNormalization(name= 'bn_m{}'.format(features))(d)
@@ -796,6 +804,7 @@ elif True:
         (('-dol' + str(args.dropout_last)) if args.dropout_last != 0. else '') + \
         ('-pooling' + args.pooling) + \
         ('-id' if args.include_distractors else '') + \
+        ('-vggplaces' if args.vgg_places else '') + \
         ('-cc{}'.format(','.join([str(c) for c in args.center_crops])) if args.center_crops else '') + \
         ('-cas' if args.class_aware_sampling else '') + \
         ('-nd' if args.no_dense else '')
@@ -843,6 +852,7 @@ if training:
                 print("Freezing weights for classifier {}".format(layer.name))
                 for classifier_layer in layer.layers:
                     classifier_layer.trainable = False
+                break # only freeze first classifier
 
     model.summary()
 
