@@ -265,6 +265,8 @@ def preprocess_image(img):
         'VGG19'             : 'vgg19',
         'Xception'          : 'xception',
 
+        'VGG16PlacesHybrid1365' : 'vgg16_places_hybrid1365',
+
         'SEDenseNetImageNet121' : 'se_densenet',
         'SEDenseNetImageNet161' : 'se_densenet',
         'SEDenseNetImageNet169' : 'se_densenet',
