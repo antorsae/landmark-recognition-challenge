@@ -859,8 +859,8 @@ if training:
         )
 
     if not args.include_distractors:
-        metric  = "-val_acc{val_preditions_categorical_accuracy:.6f}"
-        monitor = "val_preditions_categorical_accuracy"
+        metric  = "-val_acc{val_predictions_categorical_accuracy:.6f}"
+        monitor = "val_predictions_categorical_accuracy"
     else:
         metric  = "-val_acc{val_distractors_binary_accuracy:.4f}"
         monitor = "val_distractors_binary_accuracy"
