@@ -265,6 +265,8 @@ def preprocess_image(img):
         'VGG19'             : 'vgg19',
         'Xception'          : 'xception',
 
+        'VGG16PlacesHybrid1365' : 'vgg16_places_hybrid1365',
+
         'SEDenseNetImageNet121' : 'se_densenet',
         'SEDenseNetImageNet161' : 'se_densenet',
         'SEDenseNetImageNet169' : 'se_densenet',
@@ -857,8 +859,8 @@ if training:
         )
 
     if not args.include_distractors:
-        metric  = "-val_acc{val_preditions_categorical_accuracy:.6f}"
-        monitor = "val_preditions_categorical_accuracy"
+        metric  = "-val_acc{val_predictions_categorical_accuracy:.6f}"
+        monitor = "val_predictions_categorical_accuracy"
     else:
         metric  = "-val_acc{val_distractors_binary_accuracy:.4f}"
         monitor = "val_distractors_binary_accuracy"
