@@ -112,6 +112,8 @@ parser.add_argument('-vpc', '--val-percent', type=float, default=0.15, help='Val
 parser.add_argument('-cc', '--center-crops', nargs='*', type=int, default=[], help='Train on center crops only (not random crops) for the selected classes e.g. -cc 1 6 or all -cc -1')
 parser.add_argument('-ap', '--augmentation-probability', type=float, default=1., help='Probability of augmentation after 1st seen sample')
 parser.add_argument('-fcm', '--freeze-classifier', action='store_true', help='Freeze classifier weights (useful to fine-tune FC layers)')
+parser.add_argument('-fac', '--freeze-all-classifiers', action='store_true', help='Freeze all classifier (feature extractor) weights when using -id')
+
 # training regime (class aware sampling options)
 parser.add_argument('-cas', '--class-aware-sampling', action='store_true', help='Use class aware sampling to balance dataset (instead of class weights)')
 parser.add_argument('-casac', '--class-aware-sampling-accuracy-target', type=float, default=0.9, help='Threshold to move to next landmark group (when using -cas)')
@@ -121,7 +123,8 @@ parser.add_argument('-casr', '--class-aware-sampling-resume', type=int, default=
 
 # dataset (training)
 parser.add_argument('-id', '--include-distractors', action='store_true', help='Include distractors')
-parser.add_argument('-p1365', '--vgg-places', action='store_true', help='Use VGG16PlacesHybrid1365 features for distractor training')
+parser.add_argument('-p1365', '--vgg-places1365', action='store_true', help='Use VGG16PlacesHybrid1365 features for distractor training')
+parser.add_argument('-p365',  '--vgg-places365', action='store_true', help='Use VGG16Places365 features for distractor training')
 
 VGG16PlacesHybrid1365
 # test
@@ -173,6 +176,7 @@ if args.include_distractors:
     NON_LANDMARK_DISTRACTOR_JPGS = list(Path('distractors').glob('*.jpg'))
     LANDMARK_DISTRACTOR_JPGS     = list(Path('../landmark-retrieval-challenge/train').glob('*.jpg'))[:len(NON_LANDMARK_DISTRACTOR_JPGS)]
     DISTRACTOR_JPGS = NON_LANDMARK_DISTRACTOR_JPGS + LANDMARK_DISTRACTOR_JPGS
+    random.shuffle(DISTRACTOR_JPGS)
     DISTRACTOR_IDS    = { os.path.splitext(os.path.basename(item))[0] for item in DISTRACTOR_JPGS }
 
 CROP_SIZE = args.crop_size
@@ -776,9 +780,11 @@ elif True:
 
     if args.include_distractors:
         d = logits
-        if args.vgg_places:
+        if args.vgg_places365:
+            places_features = VGG16Places365(include_top=False, pooling='avg')(input_image)
+            d = concatenate([d, places_features])
+        elif args.vgg_places1365:
             places_features = VGG16PlacesHybrid1365(include_top=False, pooling='avg')(input_image)
-            #places_features = GlobalAveragePooling2D()(places_features)
             d = concatenate([d, places_features])
         for features in [1024,512,256,128]:
                 d = Dense(features,    name= 'd_fc{}'.format(features))(d)
@@ -805,7 +811,8 @@ elif True:
         (('-dol' + str(args.dropout_last)) if args.dropout_last != 0. else '') + \
         ('-pooling' + args.pooling) + \
         ('-id' if args.include_distractors else '') + \
-        ('-vggplaces' if args.vgg_places else '') + \
+        ('-vggplaces365' if args.vgg_places365 else '') + \
+        ('-vggplaces1365' if args.vgg_places1365 else '') + \
         ('-cc{}'.format(','.join([str(c) for c in args.center_crops])) if args.center_crops else '') + \
         ('-cas' if args.class_aware_sampling else '') + \
         ('-nd' if args.no_dense else '')
@@ -853,7 +860,8 @@ if training:
                 print("Freezing weights for classifier {}".format(layer.name))
                 for classifier_layer in layer.layers:
                     classifier_layer.trainable = False
-                break # only freeze first classifier
+                if not args.freeze_all_classifiers:
+                    break # otherwise freeze only first
 
     model.summary()
 
