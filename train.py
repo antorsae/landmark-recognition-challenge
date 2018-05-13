@@ -125,6 +125,7 @@ parser.add_argument('-casr', '--class-aware-sampling-resume', type=int, default=
 parser.add_argument('-id', '--include-distractors', action='store_true', help='Include distractors')
 parser.add_argument('-p1365', '--vgg-places1365', action='store_true', help='Use VGG16PlacesHybrid1365 features for distractor training')
 parser.add_argument('-p365',  '--vgg-places365', action='store_true', help='Use VGG16Places365 features for distractor training')
+parser.add_argument('-tk',  '--top-k', type=int, default=0, help='Only keep top-k logits from feature extractor -tk 512')
 
 VGG16PlacesHybrid1365
 # test
@@ -780,6 +781,13 @@ elif True:
 
     if args.include_distractors:
         d = logits
+        if args.top_k != 0:
+            import tensorflow as tf
+            def top_k(x, k):
+                v, _ = tf.nn.top_k(x, k)
+                return v
+            d = Lambda(top_k, output_shape = (args.top_k,), arguments={'k' : args.top_k}, name='top_{}_logits'.format(args.top_k))(d)
+
         if args.vgg_places365:
             places_features = VGG16Places365(include_top=False, pooling='avg')(input_image)
             d = concatenate([d, places_features])
@@ -813,6 +821,7 @@ elif True:
         ('-id' if args.include_distractors else '') + \
         ('-vggplaces365' if args.vgg_places365 else '') + \
         ('-vggplaces1365' if args.vgg_places1365 else '') + \
+        (('-topk'  + str(args.top_k)) if args.top_k != 0. else '') + \
         ('-cc{}'.format(','.join([str(c) for c in args.center_crops])) if args.center_crops else '') + \
         ('-cas' if args.class_aware_sampling else '') + \
         ('-nd' if args.no_dense else '')
