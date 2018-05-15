@@ -34,6 +34,7 @@ preds = defaultdict(list)
 missing = set()
 n_csvs = len(args.csv_files)
 max_scores = [0.] * n_csvs
+min_scores = [np.inf] * n_csvs
 
 for i, csv_file in enumerate(args.csv_files):
     print("Reading {}".format(csv_file))
@@ -46,6 +47,7 @@ for i, csv_file in enumerate(args.csv_files):
                 landmark, score = prediction
                 landmark, score = int(landmark), float(score)
                 max_scores[i] = max(max_scores[i], score)
+                min_scores[i] = min(min_scores[i], score)
                 preds[idx].append((landmark, score))
             else:
                 preds[idx].append((None, 0.))
@@ -63,7 +65,7 @@ with open(args.ensemble_csv, 'w') as csvfile:
     for idx, predictions in preds.items():
         landmarks, scores = zip(*predictions)
         # normalize scores between 0-1
-        scores = [score/max_score for score,max_score in zip(scores, max_scores)]
+        scores = [(score-min_score)/(max_score - min_score) for score,max_score,min_score in zip(scores, max_scores, min_scores)]
         # remove predictions with no landmark
         predictions = [(landmarks[i], scores[i]) for i,_landmark in enumerate(landmarks) if _landmark != None ]
         if predictions == []:
@@ -74,7 +76,7 @@ with open(args.ensemble_csv, 'w') as csvfile:
         landmark_scores   = [scores[i] for i,_landmark in enumerate(landmarks) if _landmark == landmark ]
         n_agreements = landmarks.count(landmark)
         agreements[n_csvs - n_agreements] += 1 
-        if n_agreements >= 2:
+        if n_agreements >= 2 and (np.all(landmark_scores) != 0.):
             # agreement same
             score    = np.mean(landmark_scores) + n_agreements
         else:
@@ -82,7 +84,7 @@ with open(args.ensemble_csv, 'w') as csvfile:
             score    = max(scores)
             landmark = landmarks[argmax(scores)]
 
-        if (landmark != 15000) and (landmark != -1):
+        if (landmark != 15000) and (landmark != -1) and (score > 0.):
             ensemble[idx] = (landmark, score)
             csv_writer.writerow([idx, "{} {}".format(landmark, score)])
             rows += 1
