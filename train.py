@@ -174,8 +174,11 @@ TRAIN_CSV           = 'train.csv'
 TEST_CSV            = 'test.csv'
 
 if args.include_distractors:
-    NON_LANDMARK_DISTRACTOR_JPGS = list(Path('distractors').glob('*.jpg'))
-    LANDMARK_DISTRACTOR_JPGS     = list(Path('../landmark-retrieval-challenge/train').glob('*.jpg'))[:len(NON_LANDMARK_DISTRACTOR_JPGS)]
+    NON_LANDMARK_DISTRACTOR_JPGS  = list(Path('distractors').glob('*.jpg'))
+    NON_LANDMARK_DISTRACTOR_JPGS += list(Path('../yelp-restaurant-photo-classification/train_photos').glob('[0-9a-z]*.jpg'))
+    NON_LANDMARK_DISTRACTOR_JPGS += list(Path('open-images-dataset/train').glob('*.jpg')) 
+
+    LANDMARK_DISTRACTOR_JPGS      = list(Path('../landmark-retrieval-challenge/train').glob('*.jpg'))[:len(NON_LANDMARK_DISTRACTOR_JPGS)]
     DISTRACTOR_JPGS = NON_LANDMARK_DISTRACTOR_JPGS + LANDMARK_DISTRACTOR_JPGS
     random.shuffle(DISTRACTOR_JPGS)
     DISTRACTOR_IDS    = { os.path.splitext(os.path.basename(item))[0] for item in DISTRACTOR_JPGS }
@@ -929,8 +932,9 @@ if training:
 
 elif args.test or args.test_train:
 
-    
     has_distractor_head = True if len(model.outputs) > 1 else False
+    model = Model(inputs=model.input, outputs=model.outputs + [model.get_layer('logits').output[1]])
+
     model.summary()
 
     if args.test:
@@ -966,18 +970,20 @@ elif args.test or args.test_train:
 
             def predict_minibatch():
                 if has_distractor_head:
-                    predictions, distractors = model.predict(imgs[:batch_id])
+                    predictions, distractors, logits = model.predict(imgs[:batch_id])
                 else:
-                    predictions              = model.predict(imgs[:batch_id])
+                    predictions, logits              = model.predict(imgs[:batch_id])
                     distractors = predictions # hack to avoid code dup
 
                 cats = np.argmax(predictions, axis=1)
-                for i, (cat, distractor, _idx) in enumerate(zip(cats, distractors, batch_idx)):
+                for i, (cat, distractor, logit, _idx) in enumerate(zip(cats, distractors, logits, batch_idx)):
+                    #score = np.max(logit)
                     score = predictions[i, cat]
                     landmark = cat_to_landmark[cat]
                     is_distractor = False
                     if has_distractor_head and distractor >= 0.5:
-                        landmark = -1 
+                        #landmark = -1 
+                        score -= 10000.
                     if (score >= args.threshold):
                         csv_writer.writerow([_idx, "{} {}".format(landmark, score)])
                     else:
@@ -1010,5 +1016,10 @@ elif args.test or args.test_train:
             if batch_id != 0:
                 predict_minibatch()
 
+    if args.test:
+        print("kaggle competitions submit -f {} -m '{}'".format(
+            csv_name,
+            ' '.join(sys.argv)
+            ))
 
 
