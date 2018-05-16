@@ -106,10 +106,11 @@ parser.add_argument('-dl', '--delete-layers', nargs='+', type=str, default=[], h
 parser.add_argument('-nd', '--no-dense', action='store_true', help='Dont add any Dense layer at the end')
 parser.add_argument('-bf', '--bottleneck-features', type=int, default=16384, help='If classifier supports it, override number of bottleneck feautures (typically 2048)')
 parser.add_argument('-pcf', '--project-classifier-features', type=int, default=0, help='For -id project classifier features into subspace of given size, e.g. -pcf 512')
+parser.add_argument('-tl', '--triplet-loss', action='store_true', help='Use triplet loss to train feature extractor model')
+
 # training regime
 parser.add_argument('-cs', '--crop-size', type=int, default=256, help='Crop size')
 parser.add_argument('-vpc', '--val-percent', type=float, default=0.15, help='Val percent')
-parser.add_argument('-cc', '--center-crops', nargs='*', type=int, default=[], help='Train on center crops only (not random crops) for the selected classes e.g. -cc 1 6 or all -cc -1')
 parser.add_argument('-ap', '--augmentation-probability', type=float, default=1., help='Probability of augmentation after 1st seen sample')
 parser.add_argument('-fcm', '--freeze-classifier', action='store_true', help='Freeze classifier weights (useful to fine-tune FC layers)')
 parser.add_argument('-fac', '--freeze-all-classifiers', action='store_true', help='Freeze all classifier (feature extractor) weights when using -id')
@@ -133,6 +134,7 @@ VGG16PlacesHybrid1365
 parser.add_argument('-t', '--test', action='store_true', help='Test model and generate CSV/npy submission file')
 parser.add_argument('-tt', '--test-train', action='store_true', help='Test model on the training set')
 parser.add_argument('-th', '--threshold', default=0., type=float, help='Ignore predictions less than threshold, e.g. -th 0.6')
+parser.add_argument('-ssd',  '--scale-score-distractors', action='store_true', help='Scale softmax score by distractor soft-prob')
 
 args = parser.parse_args()
 
@@ -431,6 +433,27 @@ def process_item_worker(worker_id, lock, shared_mem_X, shared_mem_y, jobs, resul
             is_good_item = True
         results.put((worker_id, is_good_item, item))
 
+# multiprocess worker to read items and put them in shared memory for consumer
+def process_item_worker_triplet(worker_id, lock, shared_mem_X, shared_mem_y, jobs, results):
+    # make sure augmentations are different for each worker
+    np.random.seed()
+    random.seed()
+
+    while True:
+        items, augs, training, predict = jobs.get()
+        img_p1, one_hot_class_idx_p1, item_p1 = process_item(items[0], augs[0], training, predict)
+        img_p2, one_hot_class_idx_p2, item_p2 = process_item(items[1], augs[1], training, predict)
+        img_n1, one_hot_class_idx_n1, item_n1 = process_item(items[2], augs[2], training, predict)
+        is_good_item = False
+        if (one_hot_class_idx_p1 is not None) and (one_hot_class_idx_p2 is not None) and (one_hot_class_idx_n1 is not None):
+            lock.acquire()
+            shared_mem_X[worker_id,...,0] = img_p1
+            shared_mem_X[worker_id,...,1] = img_p2
+            shared_mem_X[worker_id,...,2] = img_n1
+            is_good_item = True
+        results.put((worker_id, is_good_item, (item_p1, item_p2, item_n1)))
+
+
 # Callback to monitor accuracy on a per-batch basis
 class AccuracyReset(Callback):
 
@@ -485,19 +508,24 @@ def gen(items, batch_size, training=True, predict=False, accuracy_callback=None)
     validation = not training 
     items_set = set(items)
 
-    # X image crops
-    X = np.empty((batch_size, CROP_SIZE, CROP_SIZE, 3), dtype=np.float32)
+    if args.triplet_loss:
+        Xp1 = np.empty((batch_size, CROP_SIZE, CROP_SIZE, 3), dtype=np.float32)
+        Xp2 = np.empty((batch_size, CROP_SIZE, CROP_SIZE, 3), dtype=np.float32)
+        Xn1 = np.empty((batch_size, CROP_SIZE, CROP_SIZE, 3), dtype=np.float32)
+    else:
+        # X image crops
+        X = np.empty((batch_size, CROP_SIZE, CROP_SIZE, 3), dtype=np.float32)
 
     if predict:
         training = False
 
     # class index
-    y = np.empty((batch_size, N_CLASSES),               dtype=np.float32)
+    y = np.zeros((batch_size, N_CLASSES),               dtype=np.float32)
     if args.include_distractors:
         d = np.empty((batch_size),                      dtype=np.float32)
     
     n_group_classes = int(math.ceil(N_CLASSES / batch_size))
-    if training and (args.class_aware_sampling):
+    if training and (args.class_aware_sampling or args.triplet_loss):
         items_per_class = defaultdict(list)
         n_items_per_class = np.zeros(N_CLASSES, dtype=np.int64)
         for item in items:
@@ -527,16 +555,23 @@ def gen(items, batch_size, training=True, predict=False, accuracy_callback=None)
                 " ".join([str(cat_to_landmark[cat]) for cat in previous_classes_seen])))
         # dont save model the first time
         save_model = False
+        if args.triplet_loss:
+            classes = list(range(N_CLASSES))
+
 
     n_workers    = (cpu_count() - 1) if not predict else 1 # for prediction we need to guarantee order
-    shared_mem_X = sharedmem.empty((n_workers, CROP_SIZE, CROP_SIZE, 3), dtype=np.float32)
-    shared_mem_y = sharedmem.empty((n_workers, N_CLASSES),               dtype=np.float32)
+    if args.triplet_loss:
+        shared_mem_X = sharedmem.empty((n_workers, CROP_SIZE, CROP_SIZE, 3, 3), dtype=np.float32)
+        shared_mem_y = None
+    else:
+        shared_mem_X = sharedmem.empty((n_workers, CROP_SIZE, CROP_SIZE, 3), dtype=np.float32)
+        shared_mem_y = sharedmem.empty((n_workers, N_CLASSES),               dtype=np.float32)
     locks        = [Lock()] * n_workers
     jobs         = Queue(args.batch_size * 4 if not predict else 1)
     results      = JoinableQueue(args.batch_size * 2 if not predict else 1)
 
     [Process(
-        target=process_item_worker, 
+        target=process_item_worker if not args.triplet_loss else process_item_worker_triplet, 
         args=(worker_id, lock, shared_mem_X, shared_mem_y, jobs, results)).start() for worker_id, lock in enumerate(locks)]
 
     bad_items = set()
@@ -594,10 +629,30 @@ def gen(items, batch_size, training=True, predict=False, accuracy_callback=None)
                         item = items_per_class_running[random_class].pop()
                         training_item_chosen = item in items_set
                     classes_seen.add(random_class)
+                elif args.triplet_loss:
+                    if len(classes_running_copy) == 0:
+                        random.shuffle(classes)
+                        classes_running_copy = list(classes)
+                    random_classP = classes_running_copy.pop()
+                    if len(classes_running_copy) == 0:
+                        random.shuffle(classes)
+                        classes_running_copy = list(classes)
+                    random_classN = classes_running_copy.pop()
+
+                    def pick_item_from_class(items_per_class_running, random_class):
+                        if len(items_per_class_running[random_class]) == 0:
+                            random.shuffle(items_per_class_running[random_class])
+                            items_per_class_running[random_class]=copy.deepcopy(items_per_class[random_class])
+                        return items_per_class_running[random_class].pop()
+
+                    item_p1 = pick_item_from_class(items_per_class_running, random_classP)
+                    item_p2 = pick_item_from_class(items_per_class_running, random_classP)
+                    item_n1 = pick_item_from_class(items_per_class_running, random_classN)
+
                 else:
                     # if not using class-aware sampling, just pick one item
-                    pick_distractor =  np.random.random() <= 0.5
                     if args.include_distractors:
+                        pick_distractor =  np.random.random() <= 0.5
                         while True:
                             item = items[i % len(items)]
                             i += 1
@@ -607,13 +662,28 @@ def gen(items, batch_size, training=True, predict=False, accuracy_callback=None)
                         item = items[i % len(items)]
                         i += 1
                 if not predict:
-                    # do not augment the first time the net has seen an item
-                    aug = False if id_times_seen[get_id(item)] == 0 else True
-                    id_times_seen[get_id(item)] += 1
+                    if args.triplet_loss:
+                        augs = []
+                        augs.append(False if id_times_seen[get_id(item_p1)] == 0 else True)
+                        augs.append(False if id_times_seen[get_id(item_p2)] == 0 else True)
+                        augs.append(False if id_times_seen[get_id(item_n1)] == 0 else True)
+                        id_times_seen[get_id(item_p1)] += 1
+                        id_times_seen[get_id(item_p2)] += 1
+                        id_times_seen[get_id(item_n1)] += 1
+                    else:
+                        # do not augment the first time the net has seen an item
+                        aug = False if id_times_seen[get_id(item)] == 0 else True
+                        id_times_seen[get_id(item)] += 1
                 else:
                     # do not augment if predicting
-                    aug = False
-                jobs.put((item, aug, training, predict))
+                    if args.triplet_loss:
+                        augs = [False, False, False]
+                    else:
+                        aug = False
+                if args.triplet_loss:
+                    jobs.put(([item_p1, item_p2, item_n1], augs, training, predict))
+                else:
+                    jobs.put((item, aug, training, predict))
                 items_done += 1
 
             # loop over results and yield until no more resuls left
@@ -623,9 +693,13 @@ def gen(items, batch_size, training=True, predict=False, accuracy_callback=None)
                 results.task_done()
 
                 if is_good_item:
-                    X[batch_idx], y[batch_idx] = shared_mem_X[worker_id], shared_mem_y[worker_id]
-                    if args.include_distractors:
-                        d[batch_idx] = 1 if np.all(shared_mem_y[worker_id] == 1.) else 0
+                    if args.triplet_loss:
+                        Xp1[batch_idx], Xp2[batch_idx], Xn1[batch_idx] = \
+                            shared_mem_X[worker_id, ...,0], shared_mem_X[worker_id, ...,1], shared_mem_X[worker_id, ...,2]
+                    else:
+                        X[batch_idx], y[batch_idx] = shared_mem_X[worker_id], shared_mem_y[worker_id]
+                        if args.include_distractors:
+                            d[batch_idx] = 1 if np.all(shared_mem_y[worker_id] == 1.) else 0
                     locks[worker_id].release()
                     batch_idx += 1
                 else:
@@ -637,8 +711,11 @@ def gen(items, batch_size, training=True, predict=False, accuracy_callback=None)
 
                 if batch_idx == batch_size:
                     if not predict:
-                        _Y = y if not args.include_distractors else [y,d]
-                        yield(X, _Y)
+                        if args.triplet_loss:
+                            yield([Xp1, Xp2, Xn1], y)
+                        else:
+                            _Y = y if not args.include_distractors else [y,d]
+                            yield(X, _Y)
                     else:
                         yield(X)
                     batch_idx = 0
@@ -651,11 +728,17 @@ def gen(items, batch_size, training=True, predict=False, accuracy_callback=None)
 def zero_loss(y_true, y_pred):
     return  K.zeros(shape=(1,))
 
+def identity_loss(y_true, y_pred):
+    return K.mean(y_pred)
+
 # MAIN
 if args.model:
     print("Loading model " + args.model)
 
-    with CustomObjectScope({'HadamardClassifier': HadamardClassifier, 'zero_loss': zero_loss}):
+    with CustomObjectScope({
+        'HadamardClassifier': HadamardClassifier, 
+        'zero_loss': zero_loss,
+        'identity_loss' : identity_loss}):
         model = load_model(args.model, compile=False if not training or (args.learning_rate is not None) else True)
     # e.g. ResNet50-hp-l2-ppavg2-losscategorical_crossentropy-cs256-nofc-doc0.0-do0.0-dol0.0-poolingnone-cas-epoch008-val_acc0.575105.hdf5
     model_basename = os.path.splitext(os.path.basename(args.model))[0]
@@ -674,12 +757,11 @@ if args.model:
         print("Resuming with learning rate: {:.2e}".format(args.learning_rate))
 
 elif True:
+
     if args.learning_rate is None:
         args.learning_rate = 1e-4   # default LR unless told otherwise
 
     last_epoch = 0
-
-    input_image = Input(shape=(CROP_SIZE, CROP_SIZE, 3),  name = 'image' )
 
     classifier = globals()[args.classifier]
 
@@ -715,107 +797,142 @@ elif True:
     if args.print_classifier_summary:
         classifier_model.summary()
 
-    x = input_image
+    if args.triplet_loss:
+        input_image_p1 = Input(shape=(CROP_SIZE, CROP_SIZE, 3),  name = 'image_p1' )
+        input_image_p2 = Input(shape=(CROP_SIZE, CROP_SIZE, 3),  name = 'image_p2' )
+        input_image_n1 = Input(shape=(CROP_SIZE, CROP_SIZE, 3),  name = 'image_n1' )
 
-    x = classifier_model(x)
+        x = concatenate([classifier_model(input_image_p1), classifier_model(input_image_p2), classifier_model(input_image_n1)])
 
-    if args.reduce_pooling and x.shape.ndims == 4:
-        # reduce feature channels after classifier using convs
+        def triplet_loss(X):
+            # https://arxiv.org/pdf/1804.07275v1.pdf
+            # Eq (1)
+            features = K.int_shape(X)[-1] // 3
+            p1, p2, n1 = X[...,:features], X[...,features:2*features], X[...,2*features:]
+            d_p1_p2 = K.sum(K.square(p1 - p2))
+            d_p1_n1 = K.sum(K.square(p1 - n1))
+            d_p2_n1 = K.sum(K.square(p2 - n1))
+            m = 2.
 
-        pool_features = int(x.shape[3])
+            loss = K.mean(K.relu(m +  d_p1_p2 - d_p1_n1 ) + K.relu(m +  d_p1_p2 - d_p2_n1))
+            
+            # Eq (3,4)
+            loss += 0.001 * K.mean(K.sum(K.square(p1)) + K.sum(K.square(p2)) + K.sum(K.square(n1)))
 
-        for it in range(int(math.log2(pool_features/args.reduce_pooling))):
+            return loss
 
-            pool_features //= 2
-            x = Conv2D(pool_features, (3, 3), padding='same', use_bias=False, name='reduce_pooling{}'.format(it))(x)
-            x = BatchNormalization(name='bn_reduce_pooling{}'.format(it))(x)
-            x = Activation('relu', name='relu_reduce_pooling{}'.format(it))(x)
+        loss = Lambda(triplet_loss, output_shape = (1,), name='triplet_loss')(x)
         
-    if x.shape.ndims > 2:
-        # reduce spatial channels after classifier using pooling
-        if args.post_pooling == 'avg':
-            x = AveragePooling2D(pool_size=args.post_pool_size)(x)
-        elif args.post_pooling == 'max':
-            x = MaxPooling2D(pool_size=args.post_pool_size)(x)
+        model = Model(inputs=[input_image_p1, input_image_p2, input_image_n1], 
+            outputs=loss)
 
-        x = Reshape((-1,), name='reshape0')(x)
+    else:
+        input_image = Input(shape=(CROP_SIZE, CROP_SIZE, 3),  name = 'image' )
+        x = input_image
 
-    if args.dropout_classifier != 0.:
-        x = Dropout(args.dropout_classifier, name='dropout_classifier')(x)
+        x = classifier_model(x)
 
-    if not args.no_fcs and not args.hadamard:
+        if args.reduce_pooling and x.shape.ndims == 4:
+            # reduce feature channels after classifier using convs
 
-        # regular FC classifier
-        dropouts = np.linspace( args.dropout,  args.dropout_last, len(args.fully_connected_layers))
+            pool_features = int(x.shape[3])
 
-        x_m = x
+            for it in range(int(math.log2(pool_features/args.reduce_pooling))):
 
-        for i, (fc_layer, dropout) in enumerate(zip(args.fully_connected_layers, dropouts)):
-            if args.batch_normalization:
-                x_m = Dense(fc_layer//2, name= 'fc_m{}'.format(i))(x_m)
-                x_m = BatchNormalization(name= 'bn_m{}'.format(i))(x_m)
-                x_m = Activation(args.fully_connected_activation, 
-                                         name= 'act_m{}{}'.format(args.fully_connected_activation,i))(x_m)
-            else:
-                x_m = Dense(fc_layer//2, activation=args.fully_connected_activation, 
-                                         name= 'fc_m{}'.format(i))(x_m)
-            if dropout != 0:
-                x_m = Dropout(dropout,   name= 'dropout_fc_m{}_{:04.2f}'.format(i, dropout))(x_m)
+                pool_features //= 2
+                x = Conv2D(pool_features, (3, 3), padding='same', use_bias=False, name='reduce_pooling{}'.format(it))(x)
+                x = BatchNormalization(name='bn_reduce_pooling{}'.format(it))(x)
+                x = Activation('relu', name='relu_reduce_pooling{}'.format(it))(x)
+            
+        if x.shape.ndims > 2:
+            # reduce spatial channels after classifier using pooling
+            if args.post_pooling == 'avg':
+                x = AveragePooling2D(pool_size=args.post_pool_size)(x)
+            elif args.post_pooling == 'max':
+                x = MaxPooling2D(pool_size=args.post_pool_size)(x)
 
-        for i, (fc_layer, dropout) in enumerate(zip(args.fully_connected_layers, dropouts)):
-            if args.batch_normalization:
-                x = Dense(fc_layer,    name= 'fc{}'.format(i))(x)
-                x = BatchNormalization(name= 'bn{}'.format(i))(x)
-                x = Activation(args.fully_connected_activation, name='act{}{}'.format(args.fully_connected_activation,i))(x)
-            else:
-                x = Dense(fc_layer, activation=args.fully_connected_activation, name= 'fc{}'.format(i))(x)
-            if dropout != 0:
-                x = Dropout(dropout,                   name= 'dropout_fc{}_{:04.2f}'.format(i, dropout))(x)
+            x = Reshape((-1,), name='reshape0')(x)
+
+        if args.dropout_classifier != 0.:
+            x = Dropout(args.dropout_classifier, name='dropout_classifier')(x)
+
+        if not args.no_fcs and not args.hadamard:
+
+            # regular FC classifier
+            dropouts = np.linspace( args.dropout,  args.dropout_last, len(args.fully_connected_layers))
+
+            x_m = x
+
+            for i, (fc_layer, dropout) in enumerate(zip(args.fully_connected_layers, dropouts)):
+                if args.batch_normalization:
+                    x_m = Dense(fc_layer//2, name= 'fc_m{}'.format(i))(x_m)
+                    x_m = BatchNormalization(name= 'bn_m{}'.format(i))(x_m)
+                    x_m = Activation(args.fully_connected_activation, 
+                                             name= 'act_m{}{}'.format(args.fully_connected_activation,i))(x_m)
+                else:
+                    x_m = Dense(fc_layer//2, activation=args.fully_connected_activation, 
+                                             name= 'fc_m{}'.format(i))(x_m)
+                if dropout != 0:
+                    x_m = Dropout(dropout,   name= 'dropout_fc_m{}_{:04.2f}'.format(i, dropout))(x_m)
+
+            for i, (fc_layer, dropout) in enumerate(zip(args.fully_connected_layers, dropouts)):
+                if args.batch_normalization:
+                    x = Dense(fc_layer,    name= 'fc{}'.format(i))(x)
+                    x = BatchNormalization(name= 'bn{}'.format(i))(x)
+                    x = Activation(args.fully_connected_activation, name='act{}{}'.format(args.fully_connected_activation,i))(x)
+                else:
+                    x = Dense(fc_layer, activation=args.fully_connected_activation, name= 'fc{}'.format(i))(x)
+                if dropout != 0:
+                    x = Dropout(dropout,                   name= 'dropout_fc{}_{:04.2f}'.format(i, dropout))(x)
 
 
-    if args.hadamard:
-        # ignore unscaled logits for now (_)
-        x_features = x
-        x, logits  = HadamardClassifier(N_CLASSES, name= "logits", l2_normalize=args.l2_normalize, output_raw_logits=True)(x)
-    elif not args.no_dense:
-        x          = Dense(             N_CLASSES, name= "logits")(x)
+        if args.hadamard:
+            # ignore unscaled logits for now (_)
+            x_features = x
+            x, logits  = HadamardClassifier(N_CLASSES, name= "logits", l2_normalize=args.l2_normalize, output_raw_logits=True)(x)
+        elif not args.no_dense:
+            x          = Dense(             N_CLASSES, name= "logits")(x)
 
-    #print("Using {} activation and {} loss for predictions". format(activation, args.loss))          
+        #print("Using {} activation and {} loss for predictions". format(activation, args.loss))          
 
-    prediction = Activation(activation ="softmax", name="predictions")(x)
+        prediction = Activation(activation ="softmax", name="predictions")(x)
 
-    if args.include_distractors:
-        if args.project_classifier_features != 0:
-            d = HadamardClassifier(args.project_classifier_features, name= "features_project", l2_normalize=True, output_raw_logits=False)(x_features)
-        else:    
-            d = logits
-        if args.top_k != 0:
-            import tensorflow as tf
-            def top_k(x, k):
-                v, _ = tf.nn.top_k(x, k)
-                return v
-            d = Lambda(top_k, output_shape = (args.top_k,), arguments={'k' : args.top_k}, name='top_{}_logits'.format(args.top_k))(d)
+        if args.include_distractors:
+            if args.project_classifier_features != 0:
+                d = HadamardClassifier(args.project_classifier_features, name= "features_project", l2_normalize=True, output_raw_logits=False)(x_features)
+            else:    
+                d = logits
+            if args.top_k != 0:
+                import tensorflow as tf
+                def top_k(x, k):
+                    v, _ = tf.nn.top_k(x, k)
+                    return v
+                d = Lambda(top_k, output_shape = (args.top_k,), arguments={'k' : args.top_k}, name='top_{}_logits'.format(args.top_k))(d)
 
-        if args.vgg_places365:
-            places_features = VGG16Places365(include_top=False, pooling='avg')(input_image)
-            d = concatenate([d, places_features])
-        elif args.vgg_places1365:
-            places_features = VGG16PlacesHybrid1365(include_top=False, pooling='avg')(input_image)
-            d = concatenate([d, places_features])
-        for features in [1024,512,256,128]:
-                d = Dense(features,    name= 'd_fc{}'.format(features))(d)
-                d = BatchNormalization(name= 'bn_m{}'.format(features))(d)
-                d = Activation(args.fully_connected_activation,
-                    name= 'act_m{}{}'.format(args.fully_connected_activation,features))(d)
-        distractor = Dense(   1, activation='sigmoid', name='distractors')(d)
+            if args.vgg_places365:
+                places_features = VGG16Places365(include_top=False, pooling='avg')(input_image)
+                d = concatenate([d, places_features])
+            elif args.vgg_places1365:
+                places_features = VGG16PlacesHybrid1365(include_top=False, pooling='avg')(input_image)
+                d = concatenate([d, places_features])
+            for features in [1024,512,256,128]:
+                    d = Dense(features,    name= 'd_fc{}'.format(features))(d)
+                    d = BatchNormalization(name= 'bn_m{}'.format(features))(d)
+                    d = Activation(args.fully_connected_activation,
+                        name= 'act_m{}{}'.format(args.fully_connected_activation,features))(d)
 
-    model = Model(inputs=input_image, outputs=prediction if not args.include_distractors else (prediction, distractor))
+            distractor = Dense(   1, activation='sigmoid', name='distractors')(d)        
 
-    if args.include_distractors:
-        model.get_layer('logits').trainable = False
+        model = Model(inputs=input_image, outputs=prediction if not args.include_distractors else (prediction, distractor))
 
-    model_name = args.classifier + \
-        ('-hp' if args.hadamard else '') + \
+        if args.include_distractors:
+            model.get_layer('logits').trainable = False
+
+    model_name = args.classifier
+    if args.triplet_loss:
+        model_name += '-cs{}'.format(args.crop_size) 
+    else:
+        model_name += ('-hp' if args.hadamard else '') + \
         ('-l2' if args.l2_normalize else '-nol2' if args.hadamard else '') + \
         ('-pp{}{}'.format(args.post_pooling, args.post_pool_size) if args.post_pooling else '') + \
         '-loss{}'.format(args.loss) + \
@@ -829,8 +946,8 @@ elif True:
         ('-id' if args.include_distractors else '') + \
         ('-vggplaces365' if args.vgg_places365 else '') + \
         ('-vggplaces1365' if args.vgg_places1365 else '') + \
+        ('-pcf' + str(args.project_classifier_features) if args.project_classifier_features != 0 else '') + \
         (('-topk'  + str(args.top_k)) if args.top_k != 0. else '') + \
-        ('-cc{}'.format(','.join([str(c) for c in args.center_crops])) if args.center_crops else '') + \
         ('-cas' if args.class_aware_sampling else '') + \
         ('-nd' if args.no_dense else '')
 
@@ -844,36 +961,39 @@ elif True:
 
 if training:
 
-    # split train/val using stratification
-    ids_train, ids_val, _, _ = train_test_split(
-        TRAIN_JPGS, TRAIN_CATS, test_size=args.val_percent, random_state=SEED, stratify=TRAIN_CATS)
+    if not args.triplet_loss:
+        # split train/val using stratification
+        ids_train, ids_val, _, _ = train_test_split(
+            TRAIN_JPGS, TRAIN_CATS, test_size=args.val_percent, random_state=SEED, stratify=TRAIN_CATS)
 
-    if args.remove_indoor:
-        print("Before removing indoor images: Train split: {} Valid split {}".format(len(ids_train), len(ids_val)))
-        INDOOR_IMAGES_URL = 'https://s3-us-west-2.amazonaws.com/kaggleglm/train_indoor.txt'
-        INDOOR_IMAGES_PATH = get_file(
-            'train_indoor.txt',
-            INDOOR_IMAGES_URL,
-            cache_subdir='models',
-            file_hash='a0ddcbc7d0467ff48bf38000db97368e')
-        indoor_images = open(INDOOR_IMAGES_PATH, 'r').read().splitlines()
-        ids_train = [e for e in ids_train if str(e).split('/')[-1].split('.')[0] not in indoor_images]
-        ids_val = [e for e in ids_val if str(e).split('/')[-1].split('.')[0] not in indoor_images]
-        print("After removing indoor images: Train split: {} Valid split {}".format(len(ids_train), len(ids_val)))
+        if args.remove_indoor:
+            print("Before removing indoor images: Train split: {} Valid split {}".format(len(ids_train), len(ids_val)))
+            INDOOR_IMAGES_URL = 'https://s3-us-west-2.amazonaws.com/kaggleglm/train_indoor.txt'
+            INDOOR_IMAGES_PATH = get_file(
+                'train_indoor.txt',
+                INDOOR_IMAGES_URL,
+                cache_subdir='models',
+                file_hash='a0ddcbc7d0467ff48bf38000db97368e')
+            indoor_images = open(INDOOR_IMAGES_PATH, 'r').read().splitlines()
+            ids_train = [e for e in ids_train if str(e).split('/')[-1].split('.')[0] not in indoor_images]
+            ids_val = [e for e in ids_val if str(e).split('/')[-1].split('.')[0] not in indoor_images]
+            print("After removing indoor images: Train split: {} Valid split {}".format(len(ids_train), len(ids_val)))
 
-    if args.include_distractors:
-        n_distractor_val_split = int(len(DISTRACTOR_JPGS) / 2)
-        ids_val.extend(DISTRACTOR_JPGS[:n_distractor_val_split])
-        ids_train.extend(DISTRACTOR_JPGS[n_distractor_val_split:])
-        print('Using {:.2f}% distractor items in val split'.format(100. * n_distractor_val_split / len(ids_val)))
-        print('Using {:.2f}% distractor items in train split'.format(100. * (len(DISTRACTOR_JPGS) - n_distractor_val_split) / len(ids_train)))
-        random.shuffle(ids_train)
-        random.shuffle(ids_val)
-        print("Train split: {} Valid split {}".format(len(ids_train), len(ids_val)))
+        if args.include_distractors:
+            n_distractor_val_split = int(len(DISTRACTOR_JPGS) / 2)
+            ids_val.extend(DISTRACTOR_JPGS[:n_distractor_val_split])
+            ids_train.extend(DISTRACTOR_JPGS[n_distractor_val_split:])
+            print('Using {:.2f}% distractor items in val split'.format(100. * n_distractor_val_split / len(ids_val)))
+            print('Using {:.2f}% distractor items in train split'.format(100. * (len(DISTRACTOR_JPGS) - n_distractor_val_split) / len(ids_train)))
+            random.shuffle(ids_train)
+            random.shuffle(ids_val)
+            print("Train split: {} Valid split {}".format(len(ids_train), len(ids_val)))
 
-    # compute class weight if not using class-aware sampling
-    classes_train = [get_class(idx) for idx in ids_train]
-    class_weight = class_weight.compute_class_weight('balanced', np.unique(classes_train), classes_train)
+        # compute class weight if not using class-aware sampling
+        classes_train = [get_class(idx) for idx in ids_train]
+        class_weight = class_weight.compute_class_weight('balanced', np.unique(classes_train), classes_train)
+    else:
+        ids_train = TRAIN_JPGS
 
     if args.optimizer == 'adam':
         opt = Adam(lr=args.learning_rate, amsgrad=args.amsgrad)
@@ -895,31 +1015,40 @@ if training:
 
     model.summary()
 
-    if args.include_distractors:
-        loss = { 'predictions' : zero_loss, 'distractors' : args.loss} 
+    if args.triplet_loss:
+        loss = identity_loss
     else:
-        loss = { 'predictions' : args.loss} 
+        if args.include_distractors:
+            loss = { 'predictions' : zero_loss, 'distractors' : args.loss} 
+        else:
+            loss = { 'predictions' : args.loss} 
 
     model = multi_gpu_model(model, gpus=args.gpus)
 
     model.compile(optimizer=opt, 
         loss=loss, 
-        metrics={ 'predictions': ['categorical_accuracy'], 'distractors': ['binary_accuracy']},
+        metrics={ 'predictions': ['categorical_accuracy'], 'distractors': ['binary_accuracy']} if not args.triplet_loss else None,
         )
 
-    if not args.include_distractors:
-        metric  = "-val_acc{val_categorical_accuracy:.6f}"
-        monitor = "val_categorical_accuracy"
+    if not args.triplet_loss:
+        mode = 'max'
+        if not args.include_distractors:
+            metric  = "-val_acc{val_categorical_accuracy:.6f}"
+            monitor = "val_categorical_accuracy"
+        else:
+            metric  = "-val_acc{val_distractors_binary_accuracy:.4f}"
+            monitor = "val_distractors_binary_accuracy"
     else:
-        metric  = "-val_acc{val_distractors_binary_accuracy:.4f}"
-        monitor = "val_distractors_binary_accuracy"
+        mode = 'min'
+        metric = "-triplet_loss{loss:.6f}"
+        monitor = 'loss'
 
     save_checkpoint = ModelCheckpoint(
             join(MODEL_FOLDER, model_name+"-epoch{epoch:03d}"+metric+".hdf5"),
             monitor=monitor,
-            verbose=0,  save_best_only=True, save_weights_only=False, mode='max', period=1)
+            verbose=0,  save_best_only=True, save_weights_only=False, mode=mode, period=1 if not args.triplet_loss else 10)
 
-    reduce_lr = ReduceLROnPlateau(monitor=monitor, factor=0.1, patience=2, min_lr=1e-9, epsilon = 0.00001, verbose=1, mode='max')
+    reduce_lr = ReduceLROnPlateau(monitor=monitor, factor=0.1, patience=2, min_lr=1e-9, epsilon = 0.00001, verbose=1, mode=mode)
     
     clr = CyclicLR(base_lr=args.learning_rate/4, max_lr=args.learning_rate,
                         step_size=int(math.ceil(len(ids_train)  / args.batch_size)) * 1, mode='exp_range',
@@ -940,13 +1069,14 @@ if training:
     # oversampled so one epoch does not see all distinct training items.
     model.fit_generator(
             generator        = gen(ids_train, args.batch_size, accuracy_callback = accuracy_callback),
-            steps_per_epoch  = int(math.ceil(len(ids_train)  / args.batch_size)),
-            validation_data  = gen(ids_val, args.batch_size, training = False),
-            validation_steps = int(math.ceil(len(ids_val) / args.batch_size)),
+            steps_per_epoch  = int(math.ceil((len(ids_train) if not args.triplet_loss else N_CLASSES ) / args.batch_size)),
+            validation_data  = gen(ids_val, args.batch_size, training = False) if not args.triplet_loss else None,
+            validation_steps = int(math.ceil(len(ids_val) / args.batch_size))  if not args.triplet_loss else None,
             epochs = args.max_epoch,
             callbacks = callbacks,
             initial_epoch = last_epoch,
-            class_weight={  'predictions': class_weight } if ((not args.class_aware_sampling) and (not args.include_distractors)) else None)
+            class_weight={  'predictions': class_weight } \
+                if ((not args.class_aware_sampling) and (not args.include_distractors) and (not args.triplet_loss)) else None)
 
 elif args.test or args.test_train:
 
@@ -964,6 +1094,7 @@ elif args.test or args.test_train:
                 all_test_ids.append(row[0][1:-1])
 
     csv_name  = Path('csv') / (os.path.splitext(os.path.basename(args.model if args.model else args.weights))[0] +
+      ('_ssd' if args.scale_score_distractors else '') + 
       ('_test' if args.test else '_train') + '.csv')
 
     if args.test:
@@ -997,11 +1128,16 @@ elif args.test or args.test_train:
                 for i, (cat, distractor, logit, _idx) in enumerate(zip(cats, distractors, logits, batch_idx)):
                     #score = np.max(logit)
                     score = predictions[i, cat]
+                    distractor = distractor[0]
                     landmark = cat_to_landmark[cat]
                     is_distractor = False
-                    if has_distractor_head and distractor >= 0.5:
-                        #landmark = -1 
-                        score -= 10000.
+                    if has_distractor_head:
+                        if not args.scale_score_distractors:
+                            if  distractor >= 0.5:
+                                #landmark = -1 
+                                score -= 10000.
+                        else:
+                            score *= (1. - distractor)
                     if (score >= args.threshold):
                         csv_writer.writerow([_idx, "{} {}".format(landmark, score)])
                     else:
