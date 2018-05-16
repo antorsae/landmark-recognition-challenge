@@ -817,6 +817,7 @@ if training:
         TRAIN_JPGS, TRAIN_CATS, test_size=args.val_percent, random_state=SEED, stratify=TRAIN_CATS)
 
     if args.remove_indoor:
+        print("Before removing indoor images: Train split: {} Valid split {}".format(len(ids_train), len(ids_val)))
         INDOOR_IMAGES_URL = 'https://s3-us-west-2.amazonaws.com/kaggleglm/train_indoor.txt'
         INDOOR_IMAGES_PATH = get_file(
             'train_indoor.txt',
@@ -824,8 +825,9 @@ if training:
             cache_subdir='models',
             file_hash='a0ddcbc7d0467ff48bf38000db97368e')
         indoor_images = open(INDOOR_IMAGES_PATH, 'r').read().splitlines()
-        ids_train = [e for e in ids_train if e not in indoor_images]
-        ids_val = [e for e in ids_val if e not in indoor_images]
+        ids_train = [e for e in ids_train if str(e).split('/')[-1].split('.')[0] not in indoor_images]
+        ids_val = [e for e in ids_val if str(e).split('/')[-1].split('.')[0] not in indoor_images]
+        print("After removing indoor images: Train split: {} Valid split {}".format(len(ids_train), len(ids_val)))
 
     if args.include_distractors:
         n_distractor_val_split = int(len(DISTRACTOR_JPGS) / 2)
