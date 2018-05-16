@@ -105,7 +105,7 @@ parser.add_argument('-pps', '--post-pool-size', type=int, default=2, help='Pooli
 parser.add_argument('-dl', '--delete-layers', nargs='+', type=str, default=[], help='Specify layers to delete in classifier, e.g. -dl avg_pool')
 parser.add_argument('-nd', '--no-dense', action='store_true', help='Dont add any Dense layer at the end')
 parser.add_argument('-bf', '--bottleneck-features', type=int, default=16384, help='If classifier supports it, override number of bottleneck feautures (typically 2048)')
-
+parser.add_argument('-pcf', '--project-classifier-features', type=int, default=0, help='For -id project classifier features into subspace of given size, e.g. -pcf 512')
 # training regime
 parser.add_argument('-cs', '--crop-size', type=int, default=256, help='Crop size')
 parser.add_argument('-vpc', '--val-percent', type=float, default=0.15, help='Val percent')
@@ -147,7 +147,7 @@ if args.hadamard:
 
 if args.include_distractors:
     args.freeze_classifier = True
-    print("Info: auto-setting --freeze_classifier because --include-distractors")
+    print("Info: auto-setting --freeze-classifier because --include-distractors")
 
 from tensorflow.python.client import device_lib
 def get_available_gpus():
@@ -774,16 +774,20 @@ elif True:
 
     if args.hadamard:
         # ignore unscaled logits for now (_)
-        x, logits = HadamardClassifier(N_CLASSES, name= "logits", l2_normalize=args.l2_normalize, output_raw_logits=True)(x)
+        x_features = x
+        x, logits  = HadamardClassifier(N_CLASSES, name= "logits", l2_normalize=args.l2_normalize, output_raw_logits=True)(x)
     elif not args.no_dense:
-        x         = Dense(             N_CLASSES, name= "logits")(x)
+        x          = Dense(             N_CLASSES, name= "logits")(x)
 
     #print("Using {} activation and {} loss for predictions". format(activation, args.loss))          
 
     prediction = Activation(activation ="softmax", name="predictions")(x)
 
     if args.include_distractors:
-        d = logits
+        if args.project_classifier_features != 0:
+            d = HadamardClassifier(args.project_classifier_features, name= "features_project", l2_normalize=True, output_raw_logits=False)(x_features)
+        else:    
+            d = logits
         if args.top_k != 0:
             import tensorflow as tf
             def top_k(x, k):
