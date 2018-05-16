@@ -112,6 +112,8 @@ parser.add_argument('-vpc', '--val-percent', type=float, default=0.15, help='Val
 parser.add_argument('-cc', '--center-crops', nargs='*', type=int, default=[], help='Train on center crops only (not random crops) for the selected classes e.g. -cc 1 6 or all -cc -1')
 parser.add_argument('-ap', '--augmentation-probability', type=float, default=1., help='Probability of augmentation after 1st seen sample')
 parser.add_argument('-fcm', '--freeze-classifier', action='store_true', help='Freeze classifier weights (useful to fine-tune FC layers)')
+parser.add_argument('-fac', '--freeze-all-classifiers', action='store_true', help='Freeze all classifier (feature extractor) weights when using -id')
+
 # training regime (class aware sampling options)
 parser.add_argument('-cas', '--class-aware-sampling', action='store_true', help='Use class aware sampling to balance dataset (instead of class weights)')
 parser.add_argument('-casac', '--class-aware-sampling-accuracy-target', type=float, default=0.9, help='Threshold to move to next landmark group (when using -cas)')
@@ -122,7 +124,11 @@ parser.add_argument('-casr', '--class-aware-sampling-resume', type=int, default=
 # dataset (training)
 parser.add_argument('-id', '--include-distractors', action='store_true', help='Include distractors')
 parser.add_argument('-ri', '--remove-indoor', action='store_true', help='Remove indoor images from the traning set')
+parser.add_argument('-p1365', '--vgg-places1365', action='store_true', help='Use VGG16PlacesHybrid1365 features for distractor training')
+parser.add_argument('-p365',  '--vgg-places365', action='store_true', help='Use VGG16Places365 features for distractor training')
+parser.add_argument('-tk',  '--top-k', type=int, default=0, help='Only keep top-k logits from feature extractor -tk 512')
 
+VGG16PlacesHybrid1365
 # test
 parser.add_argument('-t', '--test', action='store_true', help='Test model and generate CSV/npy submission file')
 parser.add_argument('-tt', '--test-train', action='store_true', help='Test model on the training set')
@@ -169,7 +175,13 @@ TRAIN_CSV           = 'train.csv'
 TEST_CSV            = 'test.csv'
 
 if args.include_distractors:
-    DISTRACTOR_JPGS   = list(Path('distractors').glob('*.jpg'))
+    NON_LANDMARK_DISTRACTOR_JPGS  = list(Path('distractors').glob('*.jpg'))
+    NON_LANDMARK_DISTRACTOR_JPGS += list(Path('../yelp-restaurant-photo-classification/train_photos').glob('[0-9a-z]*.jpg'))
+    NON_LANDMARK_DISTRACTOR_JPGS += list(Path('open-images-dataset/train').glob('*.jpg')) 
+
+    LANDMARK_DISTRACTOR_JPGS      = list(Path('../landmark-retrieval-challenge/train').glob('*.jpg'))[:len(NON_LANDMARK_DISTRACTOR_JPGS)]
+    DISTRACTOR_JPGS = NON_LANDMARK_DISTRACTOR_JPGS + LANDMARK_DISTRACTOR_JPGS
+    random.shuffle(DISTRACTOR_JPGS)
     DISTRACTOR_IDS    = { os.path.splitext(os.path.basename(item))[0] for item in DISTRACTOR_JPGS }
 
 CROP_SIZE = args.crop_size
@@ -773,6 +785,19 @@ elif True:
 
     if args.include_distractors:
         d = logits
+        if args.top_k != 0:
+            import tensorflow as tf
+            def top_k(x, k):
+                v, _ = tf.nn.top_k(x, k)
+                return v
+            d = Lambda(top_k, output_shape = (args.top_k,), arguments={'k' : args.top_k}, name='top_{}_logits'.format(args.top_k))(d)
+
+        if args.vgg_places365:
+            places_features = VGG16Places365(include_top=False, pooling='avg')(input_image)
+            d = concatenate([d, places_features])
+        elif args.vgg_places1365:
+            places_features = VGG16PlacesHybrid1365(include_top=False, pooling='avg')(input_image)
+            d = concatenate([d, places_features])
         for features in [1024,512,256,128]:
                 d = Dense(features,    name= 'd_fc{}'.format(features))(d)
                 d = BatchNormalization(name= 'bn_m{}'.format(features))(d)
@@ -798,6 +823,9 @@ elif True:
         (('-dol' + str(args.dropout_last)) if args.dropout_last != 0. else '') + \
         ('-pooling' + args.pooling) + \
         ('-id' if args.include_distractors else '') + \
+        ('-vggplaces365' if args.vgg_places365 else '') + \
+        ('-vggplaces1365' if args.vgg_places1365 else '') + \
+        (('-topk'  + str(args.top_k)) if args.top_k != 0. else '') + \
         ('-cc{}'.format(','.join([str(c) for c in args.center_crops])) if args.center_crops else '') + \
         ('-cas' if args.class_aware_sampling else '') + \
         ('-nd' if args.no_dense else '')
@@ -858,6 +886,8 @@ if training:
                 print("Freezing weights for classifier {}".format(layer.name))
                 for classifier_layer in layer.layers:
                     classifier_layer.trainable = False
+                if not args.freeze_all_classifiers:
+                    break # otherwise freeze only first
 
     model.summary()
 
@@ -874,8 +904,8 @@ if training:
         )
 
     if not args.include_distractors:
-        metric  = "-val_acc{val_predictions_categorical_accuracy:.6f}"
-        monitor = "val_predictions_categorical_accuracy"
+        metric  = "-val_acc{val_categorical_accuracy:.6f}"
+        monitor = "val_categorical_accuracy"
     else:
         metric  = "-val_acc{val_distractors_binary_accuracy:.4f}"
         monitor = "val_distractors_binary_accuracy"
@@ -916,8 +946,9 @@ if training:
 
 elif args.test or args.test_train:
 
-    
     has_distractor_head = True if len(model.outputs) > 1 else False
+    model = Model(inputs=model.input, outputs=model.outputs + [model.get_layer('logits').output[1]])
+
     model.summary()
 
     if args.test:
@@ -953,18 +984,20 @@ elif args.test or args.test_train:
 
             def predict_minibatch():
                 if has_distractor_head:
-                    predictions, distractors = model.predict(imgs[:batch_id])
+                    predictions, distractors, logits = model.predict(imgs[:batch_id])
                 else:
-                    predictions              = model.predict(imgs[:batch_id])
+                    predictions, logits              = model.predict(imgs[:batch_id])
                     distractors = predictions # hack to avoid code dup
 
                 cats = np.argmax(predictions, axis=1)
-                for i, (cat, distractor, _idx) in enumerate(zip(cats, distractors, batch_idx)):
+                for i, (cat, distractor, logit, _idx) in enumerate(zip(cats, distractors, logits, batch_idx)):
+                    #score = np.max(logit)
                     score = predictions[i, cat]
                     landmark = cat_to_landmark[cat]
                     is_distractor = False
                     if has_distractor_head and distractor >= 0.5:
-                        landmark = -1 
+                        #landmark = -1 
+                        score -= 10000.
                     if (score >= args.threshold):
                         csv_writer.writerow([_idx, "{} {}".format(landmark, score)])
                     else:
@@ -997,5 +1030,10 @@ elif args.test or args.test_train:
             if batch_id != 0:
                 predict_minibatch()
 
+    if args.test:
+        print("kaggle competitions submit -f {} -m '{}'".format(
+            csv_name,
+            ' '.join(sys.argv)
+            ))
 
 
