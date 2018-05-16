@@ -818,9 +818,9 @@ if training:
 
     if args.remove_indoor:
         INDOOR_IMAGES_URL = 'https://s3-us-west-2.amazonaws.com/kaggleglm/train_indoor.txt'
-        weights_path = get_file(
+        INDOOR_IMAGES_PATH = get_file(
             'train_indoor.txt',
-            INDOOR_IMAGES_PATH,
+            INDOOR_IMAGES_URL,
             cache_subdir='models',
             file_hash='a0ddcbc7d0467ff48bf38000db97368e')
         indoor_images = open(INDOOR_IMAGES_PATH, 'r').read().splitlines()
