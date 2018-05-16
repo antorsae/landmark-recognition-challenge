@@ -23,7 +23,7 @@ from keras import backend as K
 from keras.engine.topology import Layer
 import keras.losses
 from keras.utils import CustomObjectScope
-
+from keras.utils.data_utils import get_file
 from multi_gpu_keras import multi_gpu_model
 #from keras.utils import multi_gpu_model
 
@@ -121,6 +121,7 @@ parser.add_argument('-casr', '--class-aware-sampling-resume', type=int, default=
 
 # dataset (training)
 parser.add_argument('-id', '--include-distractors', action='store_true', help='Include distractors')
+parser.add_argument('-ri', '--remove-indoor', action='store_true', help='Remove indoor images from the traning set')
 
 # test
 parser.add_argument('-t', '--test', action='store_true', help='Test model and generate CSV/npy submission file')
@@ -814,6 +815,17 @@ if training:
     # split train/val using stratification
     ids_train, ids_val, _, _ = train_test_split(
         TRAIN_JPGS, TRAIN_CATS, test_size=args.val_percent, random_state=SEED, stratify=TRAIN_CATS)
+
+    if args.remove_indoor:
+        INDOOR_IMAGES_URL = 'https://s3-us-west-2.amazonaws.com/kaggleglm/train_indoor.txt'
+        weights_path = get_file(
+            'train_indoor.txt',
+            INDOOR_IMAGES_PATH,
+            cache_subdir='models',
+            file_hash='a0ddcbc7d0467ff48bf38000db97368e')
+        indoor_images = open(INDOOR_IMAGES_PATH, 'r').read().splitlines()
+        ids_train = [e for e in ids_train if e not in indoor_images]
+        ids_val = [e for e in ids_val if e not in indoor_images]
 
     if args.include_distractors:
         n_distractor_val_split = int(len(DISTRACTOR_JPGS) / 2)
