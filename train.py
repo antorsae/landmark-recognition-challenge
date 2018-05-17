@@ -111,9 +111,13 @@ parser.add_argument('-tl', '--triplet-loss', action='store_true', help='Use trip
 # training regime
 parser.add_argument('-cs', '--crop-size', type=int, default=256, help='Crop size')
 parser.add_argument('-vpc', '--val-percent', type=float, default=0.15, help='Val percent')
-parser.add_argument('-ap', '--augmentation-probability', type=float, default=1., help='Probability of augmentation after 1st seen sample')
 parser.add_argument('-fcm', '--freeze-classifier', action='store_true', help='Freeze classifier weights (useful to fine-tune FC layers)')
 parser.add_argument('-fac', '--freeze-all-classifiers', action='store_true', help='Freeze all classifier (feature extractor) weights when using -id')
+
+# augmentations
+parser.add_argument('-aa', '--augment-always', action='store_true', help='If set will try to augment (based on prob) always (does not wait until 1st seen sample)')
+parser.add_argument('-aps', '--augmentation-probability-soft', type=float, default=1., help='Probability of soft augmentations after 1st seen sample (or always w/ -aa)')
+parser.add_argument('-aph', '--augmentation-probability-hard', type=float, default=0.5, help='Probability of hard augmentations after 1st seen sample (or always w/ -aa)')
 
 # training regime (class aware sampling options)
 parser.add_argument('-cas', '--class-aware-sampling', action='store_true', help='Use class aware sampling to balance dataset (instead of class weights)')
@@ -151,6 +155,10 @@ if args.hadamard:
 if args.include_distractors:
     args.freeze_classifier = True
     print("Info: auto-setting --freeze-classifier because --include-distractors")
+
+if (args.model or args.weights) and not args.triplet_loss:
+    args.augment_always = True
+    print("Info: auto-setting --augment-always because -m or -w")
 
 from tensorflow.python.client import device_lib
 def get_available_gpus():
@@ -311,7 +319,7 @@ def preprocess_image(img):
     preprocess_input_function = getattr(globals()[classifier_module_name], 'preprocess_input')
     return preprocess_input_function(img.astype(np.float32))
 
-def augment(img):
+def augment_soft(img):
     # Sometimes(0.5, ...) applies the given augmenter in 50% of all cases,
     # e.g. Sometimes(0.5, GaussianBlur(0.3)) would blur roughly every second image.
     sometimes = lambda aug: iaa.Sometimes(0.5, aug)
@@ -339,6 +347,75 @@ def augment(img):
         img = seq.augment_images(img)
 
     return img
+
+def augment_hard(img):
+    # Sometimes(0.5, ...) applies the given augmenter in 50% of all cases,
+    # e.g. Sometimes(0.5, GaussianBlur(0.3)) would blur roughly every second image.
+    sometimes = lambda aug: iaa.Sometimes(0.5, aug)
+
+    # Define our sequence of augmentation steps that will be applied to every image
+    # All augmenters with per_channel=0.5 will sample one value _per image_
+    # in 50% of all cases. In all other cases they will sample new values
+    # _per channel_.
+    seq = iaa.Sequential(
+        [
+            # apply the following augmenters to most images
+            iaa.Fliplr(0.5), # horizontally flip 50% of all images
+            # crop images by -5% to 10% of their height/width
+            sometimes(iaa.Crop(
+                percent=(0, 0.2),
+            )),
+            sometimes(iaa.Affine(
+                scale={"x": (1, 1.2), "y": (1, 1.2)}, # scale images to 80-120% of their size, individually per axis
+                translate_percent={"x": (-0.1, 0.1), "y": (-0.1, 0.1)}, # translate by -20 to +20 percent (per axis)
+                rotate=(-5, 5), # rotate by -45 to +45 degrees
+                shear=(-5, 5), # shear by -16 to +16 degrees
+                order=[0, 1], # use nearest neighbour or bilinear interpolation (fast)
+                cval=(0, 255), # if mode is constant, use a cval between 0 and 255
+                mode="reflect" # use any of scikit-image's warping modes (see 2nd image from the top for examples)
+            )),
+            # execute 0 to 5 of the following (less important) augmenters per image
+            # don't execute all of them, as that would often be way too strong
+            iaa.SomeOf((0, 1),
+                [
+                    iaa.OneOf([
+                        iaa.GaussianBlur((0, 2.0)), # blur images with a sigma between 0 and 3.0
+                        iaa.AverageBlur(k=(2, 5)), # blur image using local means with kernel sizes between 2 and 7
+                    ]),
+                    iaa.Sharpen(alpha=(0, 1.0), lightness=(0.75, 1.5)), # sharpen images
+                    # search either for all edges or for directed edges,
+                    # blend the result with the original image using a blobby mask
+                    iaa.Add((-10, 10), per_channel=0.5), # change brightness of images (by -10 to 10 of original value)
+                    iaa.AddToHueAndSaturation((-20, 20)), # change hue and saturation
+                    # either change the brightness of the whole image (sometimes
+                    # per channel) or change the brightness of subareas
+                    iaa.OneOf([
+                        iaa.Multiply((0.5, 1.5), per_channel=0.5),
+                        iaa.FrequencyNoiseAlpha(
+                            exponent=(-4, 0),
+                            first=iaa.Multiply((0.5, 1.5), per_channel=True),
+                            second=iaa.ContrastNormalization((0.5, 2.0))
+                        )
+                    ]),
+                    iaa.ContrastNormalization((0.5, 2.0), per_channel=0.5), # improve or worsen the contrast
+                    iaa.Grayscale(alpha=(0.0, 1.0)),
+                    sometimes(iaa.PiecewiseAffine(scale=(0.01, 0.03))), # sometimes move parts of the image around
+                    sometimes(iaa.PerspectiveTransform(scale=(0.01, 0.1)))
+                ],
+                random_order=True
+            ),
+            iaa.Scale({"height": CROP_SIZE, "width": CROP_SIZE }),
+        ],
+        random_order=False
+    )
+
+    if img.ndim == 3:
+        img = seq.augment_images(np.expand_dims(img, axis=0)).squeeze(axis=0)
+    else:
+        img = seq.augment_images(img)
+
+    return img
+
 
 # reads the image referenced by item from disk and
 # returns img, one_hot_class_idx, item
@@ -397,8 +474,11 @@ def process_item(item, aug = False, training = False, predict=False):
             loaded_pil = True   
         return None, None, item
 
-    if training and aug and np.random.random() < args.augmentation_probability:
-        img = augment(img)
+    if training and aug:
+        if np.random.random() < args.augmentation_probability_hard:
+            img = augment_hard(img)
+        elif np.random.random() < args.augmentation_probability_soft:
+            img = augment_soft(img)
         if np.random.random() < 0.0:
             show_image(img)
     else:
@@ -722,15 +802,15 @@ def gen(items, batch_size, training=True, predict=False, accuracy_callback=None)
                 if not predict:
                     if args.triplet_loss:
                         augs = []
-                        augs.append(False if id_times_seen[get_id(item_p1)] == 0 else True)
-                        augs.append(False if id_times_seen[get_id(item_p2)] == 0 else True)
-                        augs.append(False if id_times_seen[get_id(item_n1)] == 0 else True)
+                        augs.append(False if ( (id_times_seen[get_id(item_p1)]==0) and not args.augment_always) else True)
+                        augs.append(False if ( (id_times_seen[get_id(item_p2)]==0) and not args.augment_always) else True)
+                        augs.append(False if ( (id_times_seen[get_id(item_n1)]==0) and not args.augment_always) else True)
                         id_times_seen[get_id(item_p1)] += 1
                         id_times_seen[get_id(item_p2)] += 1
                         id_times_seen[get_id(item_n1)] += 1
                     else:
                         # do not augment the first time the net has seen an item
-                        aug = False if id_times_seen[get_id(item)] == 0 else True
+                        aug = False if ( (id_times_seen[get_id(item)]==0) and not args.augment_always) else True
                         id_times_seen[get_id(item)] += 1
                 else:
                     # do not augment if predicting
