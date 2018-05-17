@@ -194,6 +194,7 @@ id_times_seen   = { }
 
 landmark_to_ids = defaultdict(list)
 cat_to_ids      = defaultdict(list)
+cat_to_items    = defaultdict(list)
 landmark_to_cat = { }
 cat_to_landmark = { }
 # since we may get holes in landmark (ids) from the CSV file
@@ -245,7 +246,7 @@ def get_id(item):
     return os.path.splitext(os.path.basename(item))[0]
 
 # since we are doing stratified train/val split we need to dupe images
-# from landmarks wirth just 1 item
+# from landmarks with just 1 item
 ids_to_dup = [ids[0] for cat,ids in cat_to_ids.items() if len(ids) == 1]
 
 print(len(ids_to_dup))
@@ -502,6 +503,58 @@ class AccuracyReset(Callback):
                 overwrite=True)
         return
 
+# Callback to monitor accuracy on a per-batch basis
+class MonitorDistance(Callback):
+
+    def __init__(self):
+        super(MonitorDistance, self).__init__()
+
+    def on_train_begin(self, logs={}):
+        self.input_image = Input(shape=(CROP_SIZE, CROP_SIZE, 3),  name = 'image' )
+        self.feature_model = model.get_layer('vgg16')
+        self.feature_model.summary()
+        return
+ 
+    def on_train_end(self, logs={}):
+        return
+ 
+    def on_epoch_begin(self, epoch, logs={}):
+        return
+ 
+    def on_epoch_end(self, epoch, logs={}):
+
+        cats_to_monitor = range(10)
+        images = np.empty((len(cats_to_monitor) * 2, CROP_SIZE, CROP_SIZE, 3), dtype=np.float32)
+        # 0 cat0_img0
+        # 1 cat0_img1
+        # 2 cat1_img0
+        # 3 cat1_img1
+        for i, cat in enumerate(cats_to_monitor):
+            images[i * 2,    ...], _, _ = process_item(Path(TRAIN_DIR) / (cat_to_ids[cat][0] + ".jpg"))
+            images[i * 2 + 1,...], _, _ = process_item(Path(TRAIN_DIR) / (cat_to_ids[cat][1] + ".jpg"))
+        features = self.feature_model.predict(images)
+        print(features)
+
+        for i, cat in enumerate(cats_to_monitor):
+            distance = np.linalg.norm(features[i * 2] - features[i * 2 + 1])
+            print("Cat {}-{} distance: {:.4f}".format(cat, cat, distance))
+
+        print()
+
+        for i0, cat0 in enumerate(cats_to_monitor[:-1]):
+            for i1, cat1 in enumerate(cats_to_monitor[i0+1:]):
+                distance = np.linalg.norm(features[i0 * 2] - features[(i0 + i1 + 1) * 2])
+                print("Cat {}-{} distance: {:.4f}".format(cat0, cat1, distance))
+
+        return
+ 
+    def on_batch_begin(self, batch, logs={}):
+        #print(logs)
+        return
+ 
+    def on_batch_end(self, batch, logs={}):
+        return
+
 # main generator. Although predict=True mode works it is not used here.
 def gen(items, batch_size, training=True, predict=False, accuracy_callback=None):
 
@@ -751,7 +804,7 @@ if args.model:
     model_parts = model_basename.split('-')
     model_name = '-'.join([part for part in model_parts if part not in ['epoch', 'val_acc']])
     args.classifier = model_parts[0]
-    CROP_SIZE = args.crop_size  = model.get_input_shape_at(0)[1]
+    CROP_SIZE = args.crop_size  = model.get_input_shape_at(0)[1] if not args.triplet_loss else model.get_input_shape_at(0)[0][1]
     print("Overriding classifier: {} and crop size: {}".format(args.classifier, args.crop_size))
     last_epoch = int(list(filter(lambda x: x.startswith('epoch'), model_parts))[0][5:])
     print("Last epoch: {}".format(last_epoch))
@@ -983,10 +1036,10 @@ if training:
                 INDOOR_IMAGES_URL,
                 cache_subdir='models',
                 file_hash='a0ddcbc7d0467ff48bf38000db97368e')
-            indoor_images = open(INDOOR_IMAGES_PATH, 'r').read().splitlines()
+            indoor_images = set(open(INDOOR_IMAGES_PATH, 'r').read().splitlines())
             ids_train = [e for e in ids_train if str(e).split('/')[-1].split('.')[0] not in indoor_images]
-            ids_val = [e for e in ids_val if str(e).split('/')[-1].split('.')[0] not in indoor_images]
-            print("After removing indoor images: Train split: {} Valid split {}".format(len(ids_train), len(ids_val)))
+            ids_val   = [e for e in ids_val   if str(e).split('/')[-1].split('.')[0] not in indoor_images]
+            print("After removing indoor images:  Train split: {} Valid split {}".format(len(ids_train), len(ids_val)))
 
         if args.include_distractors:
             n_distractor_val_split = int(len(DISTRACTOR_JPGS) / 2)
@@ -1057,7 +1110,7 @@ if training:
             monitor=monitor,
             verbose=0,  save_best_only=True, save_weights_only=False, mode=mode, period=1)
 
-    reduce_lr = ReduceLROnPlateau(monitor=monitor, factor=0.2, patience=10, min_lr=1e-9, epsilon = 0.00001, verbose=1, mode=mode)
+    reduce_lr = ReduceLROnPlateau(monitor=monitor, factor=0.2, patience=5, min_lr=1e-9, epsilon = 0.00001, verbose=1, mode=mode)
     
     clr = CyclicLR(base_lr=args.learning_rate/4, max_lr=args.learning_rate,
                         step_size=int(math.ceil(len(ids_train)  / args.batch_size)) * 1, mode='exp_range',
@@ -1073,12 +1126,15 @@ if training:
         callbacks.append(clr)
     else:
         callbacks.append(reduce_lr)
+
+    if args.triplet_loss:
+        callbacks.append(MonitorDistance())
     
     # an epoch is just number of training samples, however if using class-aware sampling items are 
     # oversampled so one epoch does not see all distinct training items.
     model.fit_generator(
             generator        = gen(ids_train, args.batch_size, accuracy_callback = accuracy_callback),
-            steps_per_epoch  = int(math.ceil((len(ids_train) if not args.triplet_loss else N_CLASSES ) / args.batch_size)),
+            steps_per_epoch  = int(math.ceil((len(ids_train) if not args.triplet_loss else N_CLASSES) / args.batch_size)),
             validation_data  = gen(ids_val, args.batch_size, training = False) if not args.triplet_loss else None,
             validation_steps = int(math.ceil(len(ids_val) / args.batch_size))  if not args.triplet_loss else None,
             epochs = args.max_epoch,
