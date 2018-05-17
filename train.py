@@ -639,6 +639,9 @@ def gen(items, batch_size, training=True, predict=False, accuracy_callback=None)
                         classes_running_copy = list(classes)
                     random_classN = classes_running_copy.pop()
 
+                    if (random_classN == random_classP):
+                        print("HEY LOCO!")
+
                     def pick_item_from_class(items_per_class_running, random_class):
                         if len(items_per_class_running[random_class]) == 0:
                             random.shuffle(items_per_class_running[random_class])
@@ -648,6 +651,9 @@ def gen(items, batch_size, training=True, predict=False, accuracy_callback=None)
                     item_p1 = pick_item_from_class(items_per_class_running, random_classP)
                     item_p2 = pick_item_from_class(items_per_class_running, random_classP)
                     item_n1 = pick_item_from_class(items_per_class_running, random_classN)
+
+                    if (item_p1 == item_p2):
+                        print("SAME ITEM P1 P2")
 
                 else:
                     # if not using class-aware sampling, just pick one item
@@ -809,15 +815,18 @@ elif True:
             # Eq (1)
             features = K.int_shape(X)[-1] // 3
             p1, p2, n1 = X[...,:features], X[...,features:2*features], X[...,2*features:]
-            d_p1_p2 = K.sum(K.square(p1 - p2))
-            d_p1_n1 = K.sum(K.square(p1 - n1))
-            d_p2_n1 = K.sum(K.square(p2 - n1))
+            d_p1_p2 = K.sum(K.square(p1 - p2), axis=-1, keepdims=True)
+            d_p1_n1 = K.sum(K.square(p1 - n1), axis=-1, keepdims=True)
+            d_p2_n1 = K.sum(K.square(p2 - n1), axis=-1, keepdims=True)
             m = 2.
 
-            loss = K.mean(K.relu(m +  d_p1_p2 - d_p1_n1 ) + K.relu(m +  d_p1_p2 - d_p2_n1))
+            loss = K.relu(m +  d_p1_p2 - d_p1_n1 ) + K.relu(m +  d_p1_p2 - d_p2_n1)
             
             # Eq (3,4)
-            loss += 0.001 * K.mean(K.sum(K.square(p1)) + K.sum(K.square(p2)) + K.sum(K.square(n1)))
+            loss += 1e-4 * ( \
+                K.sum(K.square(p1), axis=-1, keepdims=True) + \
+                K.sum(K.square(p2), axis=-1, keepdims=True) + \
+                K.sum(K.square(n1), axis=-1, keepdims=True))
 
             return loss
 
@@ -1046,9 +1055,9 @@ if training:
     save_checkpoint = ModelCheckpoint(
             join(MODEL_FOLDER, model_name+"-epoch{epoch:03d}"+metric+".hdf5"),
             monitor=monitor,
-            verbose=0,  save_best_only=True, save_weights_only=False, mode=mode, period=1 if not args.triplet_loss else 10)
+            verbose=0,  save_best_only=True, save_weights_only=False, mode=mode, period=1)
 
-    reduce_lr = ReduceLROnPlateau(monitor=monitor, factor=0.1, patience=2, min_lr=1e-9, epsilon = 0.00001, verbose=1, mode=mode)
+    reduce_lr = ReduceLROnPlateau(monitor=monitor, factor=0.2, patience=10, min_lr=1e-9, epsilon = 0.00001, verbose=1, mode=mode)
     
     clr = CyclicLR(base_lr=args.learning_rate/4, max_lr=args.learning_rate,
                         step_size=int(math.ceil(len(ids_train)  / args.batch_size)) * 1, mode='exp_range',
