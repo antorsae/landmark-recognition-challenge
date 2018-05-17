@@ -511,7 +511,10 @@ class MonitorDistance(Callback):
 
     def on_train_begin(self, logs={}):
         self.input_image = Input(shape=(CROP_SIZE, CROP_SIZE, 3),  name = 'image' )
-        self.feature_model = model.get_layer('vgg16')
+        for layer in self.model.layers:
+            if isinstance(layer, Model):
+                self.feature_model = layer
+                break
         self.feature_model.summary()
         return
  
@@ -687,10 +690,9 @@ def gen(items, batch_size, training=True, predict=False, accuracy_callback=None)
                         random.shuffle(classes)
                         classes_running_copy = list(classes)
                     random_classP = classes_running_copy.pop()
-                    if len(classes_running_copy) == 0:
-                        random.shuffle(classes)
-                        classes_running_copy = list(classes)
-                    random_classN = classes_running_copy.pop()
+                    random_classN = random_classP
+                    while random_classN == random_classP:
+                        random_classN = random.choice(classes)
 
                     if (random_classN == random_classP):
                         print("HEY LOCO!")
@@ -704,9 +706,6 @@ def gen(items, batch_size, training=True, predict=False, accuracy_callback=None)
                     item_p1 = pick_item_from_class(items_per_class_running, random_classP)
                     item_p2 = pick_item_from_class(items_per_class_running, random_classP)
                     item_n1 = pick_item_from_class(items_per_class_running, random_classN)
-
-                    if (item_p1 == item_p2):
-                        print("SAME ITEM P1 P2")
 
                 else:
                     # if not using class-aware sampling, just pick one item
@@ -1075,8 +1074,6 @@ if training:
                 if not args.freeze_all_classifiers:
                     break # otherwise freeze only first
 
-    model.summary()
-
     if args.triplet_loss:
         loss = identity_loss
     else:
@@ -1085,6 +1082,7 @@ if training:
         else:
             loss = { 'predictions' : args.loss} 
 
+    model.summary()
     model = multi_gpu_model(model, gpus=args.gpus)
 
     model.compile(optimizer=opt, 
