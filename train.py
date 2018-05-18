@@ -71,7 +71,7 @@ random.seed(SEED)
 
 parser = argparse.ArgumentParser()
 # general
-parser.add_argument('--max-epoch', type=int, default=200, help='Epoch to run')
+parser.add_argument('--max-epoch', type=int, default=1000, help='Epoch to run')
 parser.add_argument('-g', '--gpus', type=int, default=None, help='Number of GPUs to use')
 parser.add_argument('-v', '--verbose', action='store_true', help='Pring debug/verbose info')
 parser.add_argument('-b', '--batch-size', type=int, default=48, help='Batch Size during training, e.g. -b 64')
@@ -111,6 +111,7 @@ parser.add_argument('-tl', '--triplet-loss', action='store_true', help='Use trip
 # training regime
 parser.add_argument('-cs', '--crop-size', type=int, default=256, help='Crop size')
 parser.add_argument('-vpc', '--val-percent', type=float, default=0.15, help='Val percent')
+parser.add_argument('-ps', '--pavel-split', action='store_true', help='Use Pavel validation split trick')
 parser.add_argument('-fcm', '--freeze-classifier', action='store_true', help='Freeze classifier weights (useful to fine-tune FC layers)')
 parser.add_argument('-fac', '--freeze-all-classifiers', action='store_true', help='Freeze all classifier (feature extractor) weights when using -id')
 
@@ -133,7 +134,6 @@ parser.add_argument('-p1365', '--vgg-places1365', action='store_true', help='Use
 parser.add_argument('-p365',  '--vgg-places365', action='store_true', help='Use VGG16Places365 features for distractor training')
 parser.add_argument('-tk',  '--top-k', type=int, default=0, help='Only keep top-k logits from feature extractor -tk 512')
 
-VGG16PlacesHybrid1365
 # test
 parser.add_argument('-t', '--test', action='store_true', help='Test model and generate CSV/npy submission file')
 parser.add_argument('-tt', '--test-train', action='store_true', help='Test model on the training set')
@@ -209,11 +209,12 @@ cat_to_landmark = { }
 # we'll use cat (category) starting from 0 and keep a few dicts to map around
 #cat = -1
 max_landmark = -1
+pavel_ids = set()
 with open(TRAIN_CSV, 'r') as csvfile:
     reader = csv.reader(csvfile, delimiter=',', quotechar='|')
     next(reader)
     for row in reader:
-        idx, landmark = row[0][1:-1], int(row[2])
+        idx, landmark, url = row[0][1:-1], int(row[2]), row[1]
         if idx in TRAIN_IDS:
             if landmark in landmark_to_cat:
                 landmark_cat = landmark_to_cat[landmark]
@@ -228,6 +229,8 @@ with open(TRAIN_CSV, 'r') as csvfile:
             id_times_seen[idx]  = 0
             landmark_to_ids[landmark].append(idx)
             cat_to_ids[landmark_cat].append(idx)
+            if "lh3.goog" in url:
+                pavel_ids.add(idx)
 
 N_CLASSES = len(landmark_to_cat.keys())
 
@@ -774,9 +777,6 @@ def gen(items, batch_size, training=True, predict=False, accuracy_callback=None)
                     while random_classN == random_classP:
                         random_classN = random.choice(classes)
 
-                    if (random_classN == random_classP):
-                        print("HEY LOCO!")
-
                     def pick_item_from_class(items_per_class_running, random_class):
                         if len(items_per_class_running[random_class]) == 0:
                             random.shuffle(items_per_class_running[random_class])
@@ -1103,9 +1103,13 @@ elif True:
 if training:
 
     if not args.triplet_loss:
-        # split train/val using stratification
-        ids_train, ids_val, _, _ = train_test_split(
-            TRAIN_JPGS, TRAIN_CATS, test_size=args.val_percent, random_state=SEED, stratify=TRAIN_CATS)
+        if args.pavel_split:
+            ids_train = [item for item in TRAIN_JPGS if get_id(item) not in pavel_ids]
+            ids_val   = list(set(TRAIN_JPGS).difference(set(ids_train)))
+        else:
+            # split train/val using stratification
+            ids_train, ids_val, _, _ = train_test_split(
+                TRAIN_JPGS, TRAIN_CATS, test_size=args.val_percent, random_state=SEED, stratify=TRAIN_CATS)
 
         if args.remove_indoor:
             print("Before removing indoor images: Train split: {} Valid split {}".format(len(ids_train), len(ids_val)))
@@ -1128,7 +1132,8 @@ if training:
             print('Using {:.2f}% distractor items in train split'.format(100. * (len(DISTRACTOR_JPGS) - n_distractor_val_split) / len(ids_train)))
             random.shuffle(ids_train)
             random.shuffle(ids_val)
-            print("Train split: {} Valid split {}".format(len(ids_train), len(ids_val)))
+        
+        print("Train split: {} Valid split {}".format(len(ids_train), len(ids_val)))
 
         # compute class weight if not using class-aware sampling
         classes_train = [get_class(idx) for idx in ids_train]
@@ -1205,7 +1210,7 @@ if training:
     else:
         callbacks.append(reduce_lr)
 
-    if args.triplet_loss:
+    if args.triplet_loss and False:
         callbacks.append(MonitorDistance())
     
     # an epoch is just number of training samples, however if using class-aware sampling items are 
