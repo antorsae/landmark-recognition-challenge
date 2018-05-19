@@ -139,6 +139,8 @@ parser.add_argument('-t', '--test', action='store_true', help='Test model and ge
 parser.add_argument('-tt', '--test-train', action='store_true', help='Test model on the training set')
 parser.add_argument('-th', '--threshold', default=0., type=float, help='Ignore predictions less than threshold, e.g. -th 0.6')
 parser.add_argument('-ssd',  '--scale-score-distractors', action='store_true', help='Scale softmax score by distractor soft-prob')
+parser.add_argument('-knn', '--knn', action='store_true', help='Test model using distance metric')
+parser.add_argument('-knnls', '--knn-landmark-samples', default=8, type=int, help='Max number of samples to compute features for each landmark')
 
 args = parser.parse_args()
 
@@ -967,6 +969,13 @@ elif True:
         model = Model(inputs=[input_image_p1, input_image_p2, input_image_n1], 
             outputs=loss)
 
+    elif args.knn and (args.test_train or args.test):
+        input_image = Input(shape=(CROP_SIZE, CROP_SIZE, 3),  name = 'image' )
+
+        feature = classifier_model(input_image)
+        
+        model = Model(inputs=input_image, outputs=feature)
+
     else:
         input_image = Input(shape=(CROP_SIZE, CROP_SIZE, 3),  name = 'image' )
         x = input_image
@@ -1070,6 +1079,7 @@ elif True:
             model.get_layer('logits').trainable = False
 
     model_name = args.classifier
+
     if args.triplet_loss:
         model_name += '-cs{}'.format(args.crop_size) 
     else:
@@ -1090,7 +1100,8 @@ elif True:
         ('-pcf' + str(args.project_classifier_features) if args.project_classifier_features != 0 else '') + \
         (('-topk'  + str(args.top_k)) if args.top_k != 0. else '') + \
         ('-cas' if args.class_aware_sampling else '') + \
-        ('-nd' if args.no_dense else '')
+        ('-nd' if args.no_dense else '') + \
+        ('-ps' if args.pavel_split else '')
 
     print("Model name: " + model_name)
 
@@ -1134,12 +1145,16 @@ if training:
             random.shuffle(ids_val)
         
         print("Train split: {} Valid split {}".format(len(ids_train), len(ids_val)))
+        print("Train/valid items overlap {}".format(len(set(ids_train).intersection(set(ids_val)))))
+        print("Landmarks in train split {}".format(len({get_class(item) for item in ids_train})))
+        print("Landmarks in valid split {}".format(len({get_class(item) for item in ids_val})))
 
         # compute class weight if not using class-aware sampling
         classes_train = [get_class(idx) for idx in ids_train]
         class_weight = class_weight.compute_class_weight('balanced', np.unique(classes_train), classes_train)
     else:
         ids_train = TRAIN_JPGS
+        ids_val   = None
 
     if args.optimizer == 'adam':
         opt = Adam(lr=args.learning_rate, amsgrad=args.amsgrad)
@@ -1228,100 +1243,155 @@ if training:
 
 elif args.test or args.test_train:
 
-    has_distractor_head = True if len(model.outputs) > 1 else False
-    model = Model(inputs=model.input, outputs=model.outputs + [model.get_layer('logits').output[1]])
+    if args.knn:
 
-    model.summary()
+        features_dir = Path('features') / "{}-cs{}".format(args.classifier,args.crop_size)
 
-    if args.test:
-        with open(TEST_CSV, 'r') as csvfile:
-            reader = csv.reader(csvfile, delimiter=',', quotechar='|')
-            next(reader)
-            all_test_ids = [ ]
-            for row in reader:
-                all_test_ids.append(row[0][1:-1])
+        os.makedirs(features_dir, exist_ok=True)
 
-    csv_name  = Path('csv') / (os.path.splitext(os.path.basename(args.model if args.model else args.weights))[0] +
-      ('_ssd' if args.scale_score_distractors else '') + 
-      ('_test' if args.test else '_train') + '.csv')
+        if args.test_train:
+            # compute features for up to args.knn_landmark_samples images from each landmark
+            model.summary()
+            n_features = model.outputs[0].shape[1]
 
-    if args.test:
-        all_ids  = all_test_ids
-        jpgs_dir = TEST_DIR
+            model = multi_gpu_model(model, gpus=args.gpus)
+
+            with Pool(min(args.batch_size, cpu_count())) as pool:
+                process_item_func  = partial(process_item, predict = True)
+
+                imgs = np.empty((args.batch_size, CROP_SIZE, CROP_SIZE, 3), dtype=np.float32)
+
+                for landmark in tqdm(range(N_CLASSES)):
+
+                    batch_id = 0
+                    batch_idx = [ ]
+
+                    idxs = landmark_to_ids[landmark][:args.knn_landmark_samples]
+
+                    features = np.empty((len(idxs), n_features), dtype=np.float32)
+
+                    items = [Path(TRAIN_DIR) / (idx + '.jpg') for idx in idxs]
+
+                    batch_results = pool.map(process_item_func, items)
+
+                    f = 0
+                    for idx, (img, _, _) in zip(idxs, batch_results):
+
+                        if img is not None:
+
+                            imgs[batch_id,...] = img
+                            batch_idx.append(idx)
+                            batch_id += 1
+
+                            if batch_id == args.batch_size:
+                                features[f:f+batch_id,...] = model.predict(imgs[:batch_id])
+                                f += batch_id
+                                batch_id = 0
+                                batch_idx = [ ]
+
+                    # predict remaining items (if any)
+                    if batch_id != 0:
+                        features[f:f+batch_id,...] = model.predict(imgs[:batch_id])
+                        f += batch_id
+
+                    np.save(features_dir / str(landmark), features[:f])
+
     else:
-        all_ids  = list(TRAIN_IDS)#[:20000] # CHANGE
-        jpgs_dir = TRAIN_DIR
+        has_distractor_head = True if len(model.outputs) > 1 else False
+        model = Model(inputs=model.input, outputs=model.outputs + [model.get_layer('logits').output[1]])
 
-    with Pool(min(args.batch_size, cpu_count())) as pool:
-        process_item_func  = partial(process_item, predict = True)
+        model.summary()
+        model = multi_gpu_model(model, gpus=args.gpus)
 
-        with open(csv_name, 'w') as csvfile:
+        if args.test:
+            with open(TEST_CSV, 'r') as csvfile:
+                reader = csv.reader(csvfile, delimiter=',', quotechar='|')
+                next(reader)
+                all_test_ids = [ ]
+                for row in reader:
+                    all_test_ids.append(row[0][1:-1])
 
-            csv_writer = csv.writer(csvfile, delimiter=',',quotechar='|', quoting=csv.QUOTE_MINIMAL)
-            csv_writer.writerow(['id','landmarks'])
+        csv_name  = Path('csv') / (os.path.splitext(os.path.basename(args.model if args.model else args.weights))[0] +
+          ('_ssd' if args.scale_score_distractors else '') + 
+          ('_test' if args.test else '_train') + '.csv')
 
-            imgs = np.empty((args.batch_size, CROP_SIZE, CROP_SIZE, 3), dtype=np.float32)
+        if args.test:
+            all_ids  = all_test_ids
+            jpgs_dir = TEST_DIR
+        else:
+            all_ids  = list(TRAIN_IDS)#[:20000] # CHANGE
+            jpgs_dir = TRAIN_DIR
 
-            batch_id = 0
-            batch_idx = [ ]
+        with Pool(min(args.batch_size, cpu_count())) as pool:
+            process_item_func  = partial(process_item, predict = True)
 
-            def predict_minibatch():
-                if has_distractor_head:
-                    predictions, distractors, logits = model.predict(imgs[:batch_id])
-                else:
-                    predictions, logits              = model.predict(imgs[:batch_id])
-                    distractors = predictions # hack to avoid code dup
+            with open(csv_name, 'w') as csvfile:
 
-                cats = np.argmax(predictions, axis=1)
-                for i, (cat, distractor, logit, _idx) in enumerate(zip(cats, distractors, logits, batch_idx)):
-                    #score = np.max(logit)
-                    score = predictions[i, cat]
-                    distractor = distractor[0]
-                    landmark = cat_to_landmark[cat]
-                    is_distractor = False
+                csv_writer = csv.writer(csvfile, delimiter=',',quotechar='|', quoting=csv.QUOTE_MINIMAL)
+                csv_writer.writerow(['id','landmarks'])
+
+                imgs = np.empty((args.batch_size, CROP_SIZE, CROP_SIZE, 3), dtype=np.float32)
+
+                batch_id = 0
+                batch_idx = [ ]
+
+                def predict_minibatch():
                     if has_distractor_head:
-                        if not args.scale_score_distractors:
-                            if  distractor >= 0.5:
-                                #landmark = -1 
-                                score -= 10000.
+                        predictions, distractors, logits = model.predict(imgs[:batch_id])
+                    else:
+                        predictions, logits              = model.predict(imgs[:batch_id])
+                        distractors = predictions # hack to avoid code dup
+
+                    cats = np.argmax(predictions, axis=1)
+                    for i, (cat, distractor, logit, _idx) in enumerate(zip(cats, distractors, logits, batch_idx)):
+                        #score = np.max(logit)
+                        score = predictions[i, cat]
+                        distractor = distractor[0]
+                        landmark = cat_to_landmark[cat]
+                        is_distractor = False
+                        if has_distractor_head:
+                            if not args.scale_score_distractors:
+                                if  distractor >= 0.5:
+                                    #landmark = -1 
+                                    score -= 10000.
+                            else:
+                                score *= (1. - distractor)
+                        if (score >= args.threshold):
+                            csv_writer.writerow([_idx, "{} {}".format(landmark, score)])
                         else:
-                            score *= (1. - distractor)
-                    if (score >= args.threshold):
-                        csv_writer.writerow([_idx, "{} {}".format(landmark, score)])
-                    else:
-                        csv_writer.writerow([_idx, ""])    
+                            csv_writer.writerow([_idx, ""])    
 
-            for idxs in tqdm(
-                (all_ids[ii:ii+args.batch_size] for ii in range(0, len(all_ids), args.batch_size)), 
-                total=math.ceil(len(all_ids) / args.batch_size)):
+                for idxs in tqdm(
+                    (all_ids[ii:ii+args.batch_size] for ii in range(0, len(all_ids), args.batch_size)), 
+                    total=math.ceil(len(all_ids) / args.batch_size)):
 
-                items = [Path(jpgs_dir) / (idx + '.jpg') for idx in idxs]
+                    items = [Path(jpgs_dir) / (idx + '.jpg') for idx in idxs]
 
-                batch_results = pool.map(process_item_func, items)
+                    batch_results = pool.map(process_item_func, items)
 
-                for idx, (img, _, _) in zip(idxs, batch_results):
+                    for idx, (img, _, _) in zip(idxs, batch_results):
 
-                    if img is not None:
+                        if img is not None:
 
-                        imgs[batch_id,...] = img
-                        batch_idx.append(idx)
-                        batch_id += 1
+                            imgs[batch_id,...] = img
+                            batch_idx.append(idx)
+                            batch_id += 1
 
-                        if batch_id == args.batch_size:
-                            predict_minibatch()
-                            batch_id = 0
-                            batch_idx = [ ]
-                    else:
-                        csv_writer.writerow([idx, ""])
+                            if batch_id == args.batch_size:
+                                predict_minibatch()
+                                batch_id = 0
+                                batch_idx = [ ]
+                        else:
+                            csv_writer.writerow([idx, ""])
 
-            # predict remaining items (if any)
-            if batch_id != 0:
-                predict_minibatch()
+                # predict remaining items (if any)
+                if batch_id != 0:
+                    predict_minibatch()
 
-    if args.test:
-        print("kaggle competitions submit -f {} -m '{}'".format(
-            csv_name,
-            ' '.join(sys.argv)
-            ))
+        if args.test:
+            print("kaggle competitions submit -f {} -m '{}'".format(
+                csv_name,
+                ' '.join(sys.argv)
+                ))
 
 
