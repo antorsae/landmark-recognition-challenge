@@ -1,6 +1,7 @@
 import glob
 import numpy as np
 from annoy import AnnoyIndex
+from keras.utils.data_utils import get_file
 
 FEATURES_NUMBER = 16384
 ANNOY_INDEX = AnnoyIndex(FEATURES_NUMBER)
