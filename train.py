@@ -141,6 +141,10 @@ parser.add_argument('-th', '--threshold', default=0., type=float, help='Ignore p
 parser.add_argument('-ssd',  '--scale-score-distractors', action='store_true', help='Scale softmax score by distractor soft-prob')
 parser.add_argument('-knn', '--knn', action='store_true', help='Test model using distance metric')
 parser.add_argument('-knnls', '--knn-landmark-samples', default=8, type=int, help='Max number of samples to compute features for each landmark')
+parser.add_argument('--test-csv', default='test.csv', help='Override test.csv')
+parser.add_argument('--train-csv', default='train.csv', help='Override train.csv')
+parser.add_argument('--test-dir', default='test-dl', help='Override test images directory')
+parser.add_argument('--train-dir', default='train-dl', help='Override train images directory')
 
 args = parser.parse_args()
 
@@ -172,19 +176,19 @@ if args.gpus is None:
 
 args.batch_size *= max(args.gpus, 1)
 
-TRAIN_DIR    = 'train-dl'
+TRAIN_DIR    = args.train_dir
 TRAIN_JPGS   = set(Path(TRAIN_DIR).glob('*.jpg'))
 TRAIN_IDS    = { os.path.splitext(os.path.basename(item))[0] for item in TRAIN_JPGS }
 
 if args.test:
-    TEST_DIR     = 'test-dl'
+    TEST_DIR     = args.test_dir
     TEST_JPGS    = list(Path(TEST_DIR).glob('*.jpg'))
     TEST_IDS     = { os.path.splitext(os.path.basename(item))[0] for item in TEST_JPGS  }
 
 MODEL_FOLDER        = 'models'
 CSV_FOLDER          = 'csv'
-TRAIN_CSV           = 'train.csv'
-TEST_CSV            = 'test.csv'
+TRAIN_CSV           = args.train_csv
+TEST_CSV            = args.test_csv
 
 if args.include_distractors:
     NON_LANDMARK_DISTRACTOR_JPGS  = list(Path('distractors').glob('*.jpg'))
