@@ -4,7 +4,7 @@ from annoy import AnnoyIndex
 from tqdm import tqdm
 
 FEATURES_NUMBER = 16384
-ANNOY_INDEX = AnnoyIndex(FEATURES_NUMBER)
+ANNOY_INDEX = AnnoyIndex(FEATURES_NUMBER, metric='euclidean')
 ANNOY_INDEX.load('inxed.ann')
 
 indoors = set(open("test_indoor.txt").read().splitlines())
