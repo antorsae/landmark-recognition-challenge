@@ -69,6 +69,12 @@ np.random.seed(SEED)
 random.seed(SEED)
 # TODO tf seed
 
+tf=K.tf
+config = tf.ConfigProto()
+config.gpu_options.allow_growth = True
+sess = tf.Session(config=config)
+K.set_session(sess)
+
 parser = argparse.ArgumentParser()
 # general
 parser.add_argument('--max-epoch', type=int, default=1000, help='Epoch to run')
@@ -172,19 +178,19 @@ if args.gpus is None:
 
 args.batch_size *= max(args.gpus, 1)
 
-TRAIN_DIR    = 'train-dl'
+TRAIN_DIR    = '../../train-dl'
 TRAIN_JPGS   = set(Path(TRAIN_DIR).glob('*.jpg'))
-TRAIN_IDS    = { os.path.splitext(os.path.basename(item))[0] for item in TRAIN_JPGS }
+TRAIN_IDS    = { os.path.splitext(os.path.basename(str(item)))[0] for item in TRAIN_JPGS }
 
 if args.test:
-    TEST_DIR     = 'test-dl'
+    TEST_DIR     = '../../test-dl'
     TEST_JPGS    = list(Path(TEST_DIR).glob('*.jpg'))
-    TEST_IDS     = { os.path.splitext(os.path.basename(item))[0] for item in TEST_JPGS  }
+    TEST_IDS     = { os.path.splitext(os.path.basename(str(item)))[0] for item in TEST_JPGS  }
 
 MODEL_FOLDER        = 'models'
 CSV_FOLDER          = 'csv'
-TRAIN_CSV           = 'train.csv'
-TEST_CSV            = 'test.csv'
+TRAIN_CSV           = '../../train.csv'
+TEST_CSV            = '../../test.csv'
 
 if args.include_distractors:
     NON_LANDMARK_DISTRACTOR_JPGS  = list(Path('distractors').glob('*.jpg'))
@@ -213,10 +219,10 @@ cat_to_landmark = { }
 max_landmark = -1
 pavel_ids = set()
 with open(TRAIN_CSV, 'r') as csvfile:
-    reader = csv.reader(csvfile, delimiter=',', quotechar='|')
+    reader = csv.reader(csvfile, delimiter=',')
     next(reader)
     for row in reader:
-        idx, landmark, url = row[0][1:-1], int(row[2]), row[1]
+        idx, landmark, url = row[0], int(row[2]), row[1]
         if idx in TRAIN_IDS:
             if landmark in landmark_to_cat:
                 landmark_cat = landmark_to_cat[landmark]
@@ -253,10 +259,10 @@ print(len(id_to_landmark.keys()), N_CLASSES, max_landmark)
 assert N_CLASSES == (max_landmark +1)
 
 def get_class(item):
-    return id_to_cat[os.path.splitext(os.path.basename(item))[0]]
+    return id_to_cat[os.path.splitext(os.path.basename(str(item)))[0]]
 
 def get_id(item):
-    return os.path.splitext(os.path.basename(item))[0]
+    return os.path.splitext(os.path.basename(str(item)))[0]
 
 # since we are doing stratified train/val split we need to dupe images
 # from landmarks with just 1 item
@@ -1247,7 +1253,10 @@ elif args.test or args.test_train:
 
         features_dir = Path('features') / "{}-cs{}".format(args.classifier,args.crop_size)
 
-        os.makedirs(features_dir, exist_ok=True)
+        try:
+            os.makedirs(str(features_dir))
+        except:
+            pass
 
         if args.test_train:
             # compute features for up to args.knn_landmark_samples images from each landmark
@@ -1256,7 +1265,8 @@ elif args.test or args.test_train:
 
             model = multi_gpu_model(model, gpus=args.gpus)
 
-            with Pool(min(args.batch_size, cpu_count())) as pool:
+            pool = Pool(min(args.batch_size, cpu_count()))
+            if True:
                 process_item_func  = partial(process_item, predict = True)
 
                 imgs = np.empty((args.batch_size, CROP_SIZE, CROP_SIZE, 3), dtype=np.float32)
