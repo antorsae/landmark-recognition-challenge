@@ -1310,7 +1310,7 @@ elif args.test or args.test_train:
                 def predict_minibatch():
                     features = model.predict(imgs[:batch_id])
                     for i, (feature, _idx) in enumerate(zip(features, batch_idx)):
-                        np.save(features_dir / idx , feature)
+                        np.save(features_dir / _idx , feature)
 
                 batch_id = 0
                 batch_idx = [ ]
