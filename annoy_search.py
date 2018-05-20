@@ -7,6 +7,7 @@ FEATURES_NUMBER = 16384
 ANNOY_INDEX = AnnoyIndex(FEATURES_NUMBER)
 ANNOY_INDEX.load('inxed.ann')
 
+indoors = set(open("test_indoor.txt").read().splitlines())
 ofh = open("annoy_res.txt", "w")
 
 MAP = dict()
@@ -19,6 +20,8 @@ test_files = glob.glob('features/AXception-cs192/*.npy')
 
 for test_file in tqdm(test_files):
     test_id = test_file.split('/')[-1].split('.')[0]
+    if test_id in indoors:
+        continue
     if len(test_id) != 16:
         continue
 

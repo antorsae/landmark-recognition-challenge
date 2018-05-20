@@ -16,7 +16,6 @@ INDOOR_IMAGES_PATH = get_file(
     file_hash='a0ddcbc7d0467ff48bf38000db97368e')
 indoor_images = set(open(INDOOR_IMAGES_PATH, 'r').read().splitlines())
 
-indoors = set(open("train_indoor.txt").read().splitlines())
 files = glob.glob("features/AXception-cs192/*.npy")
 i = 0
 for file_name in files:
