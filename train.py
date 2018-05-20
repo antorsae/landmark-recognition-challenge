@@ -164,7 +164,7 @@ if args.include_distractors:
     args.freeze_classifier = True
     print("Info: auto-setting --freeze-classifier because --include-distractors")
 
-if (args.model or args.weights) and not args.triplet_loss:
+if (args.model or args.weights) and (not args.triplet_loss) and training:
     args.augment_always = True
     print("Info: auto-setting --augment-always because -m or -w")
 
@@ -1249,6 +1249,14 @@ if training:
 
 elif args.test or args.test_train:
 
+    if args.test:
+        with open(TEST_CSV, 'r') as csvfile:
+            reader = csv.reader(csvfile, delimiter=',')
+            next(reader)
+            all_test_ids = [ ]
+            for row in reader:
+                all_test_ids.append(row[0])
+
     if args.knn:
 
         features_dir = Path('features') / "{}-cs{}".format(args.classifier,args.crop_size)
@@ -1258,18 +1266,19 @@ elif args.test or args.test_train:
         except:
             pass
 
-        if args.test_train:
-            # compute features for up to args.knn_landmark_samples images from each landmark
-            model.summary()
-            n_features = model.outputs[0].shape[1]
+        # compute features for up to args.knn_landmark_samples images from each landmark
+        model.summary()
+        n_features = model.outputs[0].shape[1]
 
-            model = multi_gpu_model(model, gpus=args.gpus)
+        model = multi_gpu_model(model, gpus=args.gpus)
 
-            pool = Pool(min(args.batch_size, cpu_count()))
-            if True:
-                process_item_func  = partial(process_item, predict = True)
 
-                imgs = np.empty((args.batch_size, CROP_SIZE, CROP_SIZE, 3), dtype=np.float32)
+        pool = Pool(min(args.batch_size, cpu_count()))
+        if True:
+            process_item_func  = partial(process_item, predict = True)
+            imgs = np.empty((args.batch_size, CROP_SIZE, CROP_SIZE, 3), dtype=np.float32)
+
+            if args.test_train:
 
                 for landmark in tqdm(range(N_CLASSES)):
 
@@ -1306,20 +1315,48 @@ elif args.test or args.test_train:
 
                     np.save(features_dir / str(landmark), features[:f])
 
+            elif args.test:
+
+                def predict_minibatch():
+                    features = model.predict(imgs[:batch_id])
+                    for i, (feature, _idx) in enumerate(zip(features, batch_idx)):
+                        np.save(str(features_dir / _idx) , feature)
+
+                batch_id = 0
+                batch_idx = [ ]
+
+                for idxs in tqdm(
+                    (all_test_ids[ii:ii+args.batch_size] for ii in range(0, len(all_test_ids), args.batch_size)), 
+                    total=math.ceil(len(all_test_ids) / args.batch_size)):
+
+                    items = [str(Path(TEST_DIR) / (idx + '.jpg')) for idx in idxs]
+
+                    batch_results = pool.map(process_item_func, items)
+
+                    for idx, (img, _, _) in zip(idxs, batch_results):
+
+                        if img is not None:
+
+                            imgs[batch_id,...] = img
+                            batch_idx.append(idx)
+                            batch_id += 1
+
+                            if batch_id == args.batch_size:
+                                predict_minibatch()
+                                batch_id = 0
+                                batch_idx = [ ]
+
+                # predict remaining items (if any)
+                if batch_id != 0:
+                    predict_minibatch()
+
+
     else:
         has_distractor_head = True if len(model.outputs) > 1 else False
         model = Model(inputs=model.input, outputs=model.outputs + [model.get_layer('logits').output[1]])
 
         model.summary()
         model = multi_gpu_model(model, gpus=args.gpus)
-
-        if args.test:
-            with open(TEST_CSV, 'r') as csvfile:
-                reader = csv.reader(csvfile, delimiter=',', quotechar='|')
-                next(reader)
-                all_test_ids = [ ]
-                for row in reader:
-                    all_test_ids.append(row[0][1:-1])
 
         csv_name  = Path('csv') / (os.path.splitext(os.path.basename(args.model if args.model else args.weights))[0] +
           ('_ssd' if args.scale_score_distractors else '') + 
