@@ -31,14 +31,24 @@ for file_name in files:
         lfh.write("%s %s\n" % (i, label))
         ANNOY_INDEX.add_item(i, vectors[j][:FEATURES_NUMBER])
         i = i + 1
+        if i % 200000 == 0:
+            ANNOY_INDEX.build(1000)
+            ANNOY_INDEX.save('index.ann.%s' % int(i/200000))
+            ANNOY_INDEX = AnnoyIndex(FEATURES_NUMBER, metric='euclidean')
 
 files = glob.glob("features_retrieval/AXception-cs256/*.npy")
+for file_name in files:
     vector = np.load(file_name)
     label = -1
     lfh.write("%s %s\n" % (i, label))
     ANNOY_INDEX.add_item(i, vector[:FEATURES_NUMBER])
     i = i + 1
+    if i % 200000 == 0:
+        ANNOY_INDEX.build(1000)
+        ANNOY_INDEX.save('index.ann.%s' % int(i/200000))                                                                                                             
+        ANNOY_INDEX = AnnoyIndex(FEATURES_NUMBER, metric='euclidean')
+
 
 ANNOY_INDEX.build(1000)
-ANNOY_INDEX.save('inxed.ann')
+ANNOY_INDEX.save('index.ann.%s' % (int(i/200000)+1))
 lfh.close()
