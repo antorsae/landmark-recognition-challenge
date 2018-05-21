@@ -139,12 +139,15 @@ parser.add_argument('-t', '--test', action='store_true', help='Test model and ge
 parser.add_argument('-tt', '--test-train', action='store_true', help='Test model on the training set')
 parser.add_argument('-th', '--threshold', default=0., type=float, help='Ignore predictions less than threshold, e.g. -th 0.6')
 parser.add_argument('-ssd',  '--scale-score-distractors', action='store_true', help='Scale softmax score by distractor soft-prob')
+
+# NN related
 parser.add_argument('-knn', '--knn', action='store_true', help='Test model using distance metric')
 parser.add_argument('-knnls', '--knn-landmark-samples', default=8, type=int, help='Max number of samples to compute features for each landmark')
 parser.add_argument('--test-csv', default='test.csv', help='Override test.csv')
 parser.add_argument('--train-csv', default='train.csv', help='Override train.csv')
 parser.add_argument('--test-dir', default='test-dl', help='Override test images directory')
 parser.add_argument('--train-dir', default='train-dl', help='Override train images directory')
+parser.add_argument('--features-dir', default='features', help='Where to save computed features')
 
 args = parser.parse_args()
 
@@ -1257,7 +1260,7 @@ elif args.test or args.test_train:
 
     if args.knn:
 
-        features_dir = Path('features') / "{}-cs{}".format(args.classifier,args.crop_size)
+        features_dir = Path(args.features_dir) / "{}-cs{}".format(args.classifier,args.crop_size)
 
         os.makedirs(features_dir, exist_ok=True)
 
