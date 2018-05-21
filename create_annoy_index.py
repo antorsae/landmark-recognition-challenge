@@ -3,7 +3,7 @@ import numpy as np
 from annoy import AnnoyIndex
 from keras.utils.data_utils import get_file
 
-FEATURES_NUMBER = 16384
+FEATURES_NUMBER = 1000
 ANNOY_INDEX = AnnoyIndex(FEATURES_NUMBER, metric='euclidean')
 
 lfh = open("labels.ann", "w")
@@ -16,7 +16,7 @@ INDOOR_IMAGES_PATH = get_file(
     file_hash='a0ddcbc7d0467ff48bf38000db97368e')
 indoor_images = set(open(INDOOR_IMAGES_PATH, 'r').read().splitlines())
 
-files = glob.glob("features/AXception-cs192/*.npy")
+files = glob.glob("features/AXception-cs256/*.npy")
 i = 0
 for file_name in files:
     vectors = np.load(file_name)
@@ -32,6 +32,13 @@ for file_name in files:
         ANNOY_INDEX.add_item(i, vectors[j][:FEATURES_NUMBER])
         i = i + 1
 
-ANNOY_INDEX.build(200)
+files = glob.glob("features_retrieval/AXception-cs256/*.npy")
+    vector = np.load(file_name)
+    label = -1
+    lfh.write("%s %s\n" % (i, label))
+    ANNOY_INDEX.add_item(i, vector[:FEATURES_NUMBER])
+    i = i + 1
+
+ANNOY_INDEX.build(1000)
 ANNOY_INDEX.save('inxed.ann')
 lfh.close()
