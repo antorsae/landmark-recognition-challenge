@@ -3,6 +3,7 @@ import sys
 import jpeg4py as jpeg
 from PIL import Image
 import cv2
+import numpy as np
 label = sys.argv[1]
 
 _, output = commands.getstatusoutput(
@@ -22,6 +23,8 @@ def read_image(image_id):
 i = 0
 for image_id in output.split('\n'):
     img = read_image(image_id)
+    if len(img.shape) != 3:
+        continue
     img = img[:, :, ::-1]
     cv2.imwrite('/tmp/img%d.jpg' % i, img)
     i = i + 1
