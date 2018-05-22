@@ -10,6 +10,8 @@ import pickle
 FEATURES_NUMBER = 16384
 PCA_FEATURES    = 512
 
+train = False
+
 INDEX_FILENAME     = "features_AXception-cs256.index" 
 INDEX_FILENAME_PK  = INDEX_FILENAME + '.pk'
 INDEX_FILENAME_PCA = INDEX_FILENAME + '.pca'
@@ -65,30 +67,32 @@ else:
     
         faiss.write_VectorTransform(mat, INDEX_FILENAME_PCA)
 
-    print("PCA transformation... started")
-    train_subset = mat.apply_py(train_subset)
-    print("PCA transformation... finished")
+    if train:
+        print("PCA transformation... started")
+        train_subset = mat.apply_py(train_subset)
+        print("PCA transformation... finished")
 
-    #nlist = 1000
-    print("Training index... started")
-    #quantizer = faiss.IndexFlatL2(FEATURES_NUMBER)  # the other index
-    #index = faiss.IndexIVFFlat(quantizer, FEATURES_NUMBER, nlist, faiss.METRIC_L2)
-    # faster, uses more memory
-    index = faiss.index_factory(PCA_FEATURES, "IVF4096,Flat")
-
+    index = faiss.IndexFlatL2(PCA_FEATURES) # faiss.index_factory(PCA_FEATURES, "IVF4096,Flat")
     gpu_index = faiss.index_cpu_to_gpu(res, 0, index)#, co)
+    #nlist = 1000
+    if train:
+        print("Training index... started")
+        #quantizer = faiss.IndexFlatL2(FEATURES_NUMBER)  # the other index
+        #index = faiss.IndexIVFFlat(quantizer, FEATURES_NUMBER, nlist, faiss.METRIC_L2)
+        # faster, uses more memory
 
-    assert not gpu_index.is_trained
-    gpu_index.train(train_subset)
-    assert gpu_index.is_trained
-    print("Training index... finished")
+
+        assert not gpu_index.is_trained
+        gpu_index.train(train_subset)
+        assert gpu_index.is_trained
+        print("Training index... finished")
 
     for label, features in tqdm(label_features.items()):
-        n_features_s = max(1, features.shape[0] // 5)
+        n_features_s = max(1, features.shape[0] // 5) if train else 0
         n_features_e = features.shape[0] - n_features_s
         gpu_index.add(mat.apply_py(features[n_features_s:n_features_s+n_features_e]))
         for n_feature in range(n_features_e):
-            index_dict[subset_i+n_feature] = label
+            index_dict[subset_i+n_feature] = int(label)
         subset_i += n_features_e
 
     if False:
