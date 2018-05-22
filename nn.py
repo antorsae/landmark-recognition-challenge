@@ -15,14 +15,14 @@ INDEX_FILENAME_PK  = INDEX_FILENAME + '.pk'
 INDEX_FILENAME_PCA = INDEX_FILENAME + '.pca'
 
 res = faiss.StandardGpuResources()  # use a single GPU
-co = faiss.GpuClonerOptions()
+#co = faiss.GpuClonerOptions()
 # here we are using a 64-byte PQ, so we must set the lookup tables to
 # 16 bit float (this is due to the limited temporary memory).
-co.useFloat16 = True
+#co.useFloat16 = True
 
 if os.path.exists(INDEX_FILENAME):
     index = faiss.read_index(INDEX_FILENAME)
-    gpu_index = faiss.index_cpu_to_gpu(res, 0, index, co)
+    gpu_index = faiss.index_cpu_to_gpu(res, 0, index)#, co)
 
     mat = faiss.read_VectorTransform(INDEX_FILENAME_PCA) # todo calculate it if not there
 
@@ -63,7 +63,7 @@ else:
         mat.train(train_subset)
         print("PCA training... finished")
     
-        faiss.write_VectorTransform(mat, INDEX_FILENAME + ".pca")
+        faiss.write_VectorTransform(mat, INDEX_FILENAME_PCA)
 
     print("PCA transformation... started")
     train_subset = mat.apply_py(train_subset)
@@ -76,7 +76,7 @@ else:
     # faster, uses more memory
     index = faiss.index_factory(PCA_FEATURES, "IVF4096,Flat")
 
-    gpu_index = faiss.index_cpu_to_gpu(res, 0, index, co)
+    gpu_index = faiss.index_cpu_to_gpu(res, 0, index)#, co)
 
     assert not gpu_index.is_trained
     gpu_index.train(train_subset)
