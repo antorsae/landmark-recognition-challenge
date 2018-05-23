@@ -16,6 +16,7 @@ parser.add_argument('-tk', '--top-k', default=16, type=int, help='Store top-k NN
 parser.add_argument('-cpu', '--cpu', action='store_true', help='Dont use GPU')
 parser.add_argument('-t', '--train', action='store_true', help='Train index')
 parser.add_argument('--features-dir', default='features', help='Prefix dir of computed features, index and results')
+parser.add_argument('--results-dir', default='results', help='Prefix dir of computed features, index and results')
 parser.add_argument('-n', '--net', default='VGG16Places365-cs256', help='Subdir of computed features, e.g. -n VGG16Places365-cs256')
 parser.add_argument('-pr', '--print-results', default=0, type=int, help='Print results of the n first queries, e.g. -pr 16')
 
@@ -31,7 +32,7 @@ gpu   = not args.cpu
 features_dir = args.features_dir + "/" + args.net
 
 FEATURES_NPY       = features_dir + '/*.npy'
-INDEX_FILENAME_PRE = args.features_dir + '/' + args.net.replace("-", "_")
+INDEX_FILENAME_PRE = args.results_dir + '/' + args.net.replace("-", "_")
 INDEX_FILENAME     = INDEX_FILENAME_PRE + '.index'
 INDEX_FILENAME_PK  = INDEX_FILENAME_PRE + '.pk'
 INDEX_FILENAME_PCA = INDEX_FILENAME_PRE + '.pca'
@@ -150,9 +151,11 @@ print("Search... finished")
 
 landmarks = np.vectorize(lambda i: index_dict[i])(I)
 
-D.tofile(        args.features_dir + "/" + args.net + "_distances")
-landmarks.tofile(args.features_dir + "/" + args.net + "_landmarks")
-with open(args.features_dir + "/" + args.net + "_testids", 'wb') as fp:
+os.makedirs(args.results_dir, exist_ok=True)
+
+D.tofile(        INDEX_FILENAME_PRE + ".distances")
+landmarks.tofile(INDEX_FILENAME_PRE + ".landmarks")
+with open(INDEX_FILENAME_PRE + ".testids", 'wb') as fp:
     pickle.dump(test_ids, fp)
 
 if args.print_results != 0:
