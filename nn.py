@@ -20,6 +20,7 @@ parser.add_argument('--results-dir', default='results', help='Prefix dir of comp
 parser.add_argument('-n', '--net', default='VGG16Places365-cs256', help='Subdir of computed features, e.g. -n VGG16Places365-cs256')
 parser.add_argument('-pr', '--print-results', default=0, type=int, help='Print results of the n first queries, e.g. -pr 16')
 parser.add_argument('-f16', '--float16', action='store_true', help='Use float16 lookup tables')
+parser.add_argument('-etnn', '--extract-train-nn', action='store_true', help='Extract train nearest neighbors instead of test ones')
 
 args = parser.parse_args()
 
@@ -54,7 +55,7 @@ if os.path.exists(INDEX_FILENAME):
     with open(INDEX_FILENAME_PK, 'rb') as fp:
         index_dict = pickle.load(fp)
 else:
-    files = glob.glob(FEATURES_NPY)
+    files = sorted(glob.glob(FEATURES_NPY))
     index_dict = { }
     label_features = { }
     i = 0
@@ -131,33 +132,62 @@ else:
 print("Indexed vectors {}".format(index.ntotal))
 index.nprobe = 100
 
-files = glob.glob(FEATURES_NPY)
-#files.append(features_dir + "/36763b045d846d68.npy")
-test = np.empty((len(files), FEATURES_NUMBER), dtype=np.float32)
-subset_i = 0
-test_ids = []
-print("Loading test features for search")
-for file_name in tqdm(files):
-    features = np.load(file_name)
-    test_id = file_name.split('/')[-1].split('.')[0]
-    if len(test_id) != 16:
-        continue
-    test_ids.append(test_id)
-    test[subset_i] = features
-    subset_i += 1
-index_dict[-1] = -1
-test = test[:subset_i]
-print("Search... started")  
-D, I = index.search(mat.apply_py(test) if pca else test, args.top_k)
-print("Search... finished")
+files = sorted(glob.glob(FEATURES_NPY))
+
+if not args.extract_train_nn:
+    test = np.empty((len(files), FEATURES_NUMBER), dtype=np.float32)
+    subset_i = 0
+    test_ids = []
+    print("Loading test features for search")
+    for file_name in tqdm(files):
+        features = np.load(file_name)
+        test_id = file_name.split('/')[-1].split('.')[0]
+        if len(test_id) != 16:
+            continue
+        test_ids.append(test_id)
+        test[subset_i] = features
+        subset_i += 1
+    index_dict[-1] = -1
+    test = test[:subset_i]
+    print("Search... started")  
+    D, I = index.search(mat.apply_py(test) if pca else test, args.top_k)
+    print("Search... finished")
+    suffix = ""
+else:
+    label_features = { }
+    n_train_set = 0
+    for file_name in tqdm(files):
+        label = file_name.split('/')[-1].split('.')[0]
+        if len(label) == 16:
+            continue
+        features = np.load(file_name)
+        assert features.shape[1] == FEATURES_NUMBER
+        label_features[label] = features
+        n_train_set += features.shape[0]
+    train_set = np.empty((n_train_set, FEATURES_NUMBER), dtype=np.float32)
+    print("Search... started")  
+    test_ids = []
+    D = np.empty((n_train_set, args.top_k+1), np.float32)
+    I = np.empty((n_train_set, args.top_k+1), np.int32)
+    i = 0
+    for label, features in tqdm(label_features.items()):
+        print(label)
+        n_features = features.shape[0]
+        _D, _I = index.search(mat.apply_py(features) if pca else features, args.top_k+1)
+        D[i:i+n_features,...] = _D
+        I[i:i+n_features,...] = _I
+        i += n_features
+        test_ids.extend([label] * n_features)
+    print("Search... finished {} train items and {} items".format(i, n_train_set))  
+    suffix = "_train"
 
 landmarks = np.vectorize(lambda i: index_dict[i])(I)
 
 os.makedirs(args.results_dir, exist_ok=True)
 
-np.save(INDEX_FILENAME_PRE + ".distances", D)
-np.save(INDEX_FILENAME_PRE + ".landmarks", landmarks)
-with open(INDEX_FILENAME_PRE + ".testids", 'wb') as fp:
+np.save(INDEX_FILENAME_PRE + ".distances" + suffix, D)
+np.save(INDEX_FILENAME_PRE + ".landmarks" + suffix, landmarks)
+with open(INDEX_FILENAME_PRE + ".testids" + suffix, 'wb') as fp:
     pickle.dump(test_ids, fp)
 
 if args.print_results != 0:
