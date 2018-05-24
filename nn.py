@@ -19,6 +19,7 @@ parser.add_argument('--features-dir', default='features', help='Prefix dir of co
 parser.add_argument('--results-dir', default='results', help='Prefix dir of computed features, index and results')
 parser.add_argument('-n', '--net', default='VGG16Places365-cs256', help='Subdir of computed features, e.g. -n VGG16Places365-cs256')
 parser.add_argument('-pr', '--print-results', default=0, type=int, help='Print results of the n first queries, e.g. -pr 16')
+parser.add_argument('-f16', '--float16', action='store_true', help='Use float16 lookup tables')
 
 args = parser.parse_args()
 
@@ -35,13 +36,13 @@ FEATURES_NPY       = features_dir + '/*.npy'
 INDEX_FILENAME_PRE = args.results_dir + '/' + args.net.replace("-", "_")
 INDEX_FILENAME     = INDEX_FILENAME_PRE + '.index'
 INDEX_FILENAME_PK  = INDEX_FILENAME_PRE + '.pk'
-INDEX_FILENAME_PCA = INDEX_FILENAME_PRE + '.pca'
+INDEX_FILENAME_PCA = INDEX_FILENAME_PRE + '.pca' + str(args.pca)
 
 res = faiss.StandardGpuResources()  # use a single GPU
 co = faiss.GpuClonerOptions()
 # here we are using a 64-byte PQ, so we must set the lookup tables to
 # 16 bit float (this is due to the limited temporary memory).
-#co.useFloat16 = True
+if args.float16: co.useFloat16 = True
 
 if os.path.exists(INDEX_FILENAME):
     cpu_index = faiss.read_index(INDEX_FILENAME)
@@ -145,7 +146,8 @@ for file_name in tqdm(files):
     test[subset_i] = features
     subset_i += 1
 index_dict[-1] = -1
-print("Search... started")
+test = test[:subset_i]
+print("Search... started")  
 D, I = index.search(mat.apply_py(test) if pca else test, args.top_k)
 print("Search... finished")
 
@@ -153,8 +155,8 @@ landmarks = np.vectorize(lambda i: index_dict[i])(I)
 
 os.makedirs(args.results_dir, exist_ok=True)
 
-D.tofile(        INDEX_FILENAME_PRE + ".distances")
-landmarks.tofile(INDEX_FILENAME_PRE + ".landmarks")
+np.save(INDEX_FILENAME_PRE + ".distances", D)
+np.save(INDEX_FILENAME_PRE + ".landmarks", landmarks)
 with open(INDEX_FILENAME_PRE + ".testids", 'wb') as fp:
     pickle.dump(test_ids, fp)
 
