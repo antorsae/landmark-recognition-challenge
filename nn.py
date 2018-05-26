@@ -134,6 +134,8 @@ index.nprobe = 100
 
 files = sorted(glob.glob(FEATURES_NPY))
 
+suffix = "_tk{}".format(args.top_k)
+
 if not args.extract_train_nn:
     test = np.empty((len(files), FEATURES_NUMBER), dtype=np.float32)
     subset_i = 0
@@ -152,7 +154,6 @@ if not args.extract_train_nn:
     print("Search... started")  
     D, I = index.search(mat.apply_py(test) if pca else test, args.top_k)
     print("Search... finished")
-    suffix = ""
 else:
     label_features = { }
     n_train_set = 0
@@ -171,7 +172,6 @@ else:
     I = np.empty((n_train_set, args.top_k+1), np.int32)
     i = 0
     for label, features in tqdm(label_features.items()):
-        print(label)
         n_features = features.shape[0]
         _D, _I = index.search(mat.apply_py(features) if pca else features, args.top_k+1)
         D[i:i+n_features,...] = _D
@@ -179,7 +179,7 @@ else:
         i += n_features
         test_ids.extend([label] * n_features)
     print("Search... finished {} train items and {} items".format(i, n_train_set))  
-    suffix = "_train"
+    suffix += "_train"
 
 landmarks = np.vectorize(lambda i: index_dict[i])(I)
 
