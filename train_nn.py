@@ -7,6 +7,7 @@ from os.path import join
 from pathlib import Path
 import numpy as np
 import math
+import re
 
 from keras.optimizers import Adam, Adadelta, SGD
 from keras.callbacks import ModelCheckpoint, ReduceLROnPlateau, Callback
@@ -87,9 +88,9 @@ if not args.usecache:
     for network in tqdm(args.networks):
         vector = np.zeros((N_CLASSES), dtype=np.float32)
         print(network)
-        distances = np.load('results/%s.distances_train.npy' % network)
-        landmarks = np.load('results/%s.landmarks_train.npy' % network)
-        testids = pickle.load(open('results/%s.testids_train' % network, 'rb'))
+        distances = np.load('results/%s.distances_tk64_train.npy' % network)
+        landmarks = np.load('results/%s.landmarks_tk64_train.npy' % network)
+        testids = pickle.load(open('results/%s.testids_tk64_train' % network, 'rb'))
 
         i = 0
         dlt = zip(distances, landmarks, testids)
@@ -111,12 +112,12 @@ if not args.usecache:
     ]
 
     # cache
-    os.makedirs('cache', exist_ok=True)
-    for part in range(math.ceil(len(TRAIN_DATA) / 100000)):
-        np.save('cache/nns_train_data_%02d.npy' % part,
-                TRAIN_DATA[part * 100000:(part + 1) * 100000])
-        np.save('cache/nns_train_labels_%02d.npy' % part,
-                TRAIN_LABELS[part * 100000:(part + 1) * 100000])
+    #os.makedirs('cache', exist_ok=True)
+    #for part in range(math.ceil(len(TRAIN_DATA) / 100000)):
+    #    np.save('cache/nns_train_data_%02d.npy' % part,
+    #            TRAIN_DATA[part * 100000:(part + 1) * 100000])
+    #    np.save('cache/nns_train_labels_%02d.npy' % part,
+    #            TRAIN_LABELS[part * 100000:(part + 1) * 100000])
     del HAS_RIGHT_ANSWER
 else:
     cache_files = sorted(glob.glob('cache/nns_train_labels_*.npy'))
