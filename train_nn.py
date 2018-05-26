@@ -85,7 +85,6 @@ N_CLASSES = 14951
 MODEL_FOLDER = 'models'
 os.makedirs(MODEL_FOLDER, exist_ok=True)
 
-<<<<<<< HEAD
 distances=[]
 landmarks=[]
 testids  =None
@@ -111,55 +110,6 @@ assert len(set(testids)) == max(testids)+1
 _, _landmark_counts = np.unique(testids, return_counts=True)
 
 landmark_counts = { k : 1+ np.log(v) for k,v in enumerate(_landmark_counts)}
-=======
-TRAIN_LABELS = None
-if not args.usecache:
-    TRAIN_DATA = defaultdict(lambda: np.zeros((N_CLASSES), dtype=np.float32))
-    TRAIN_LABELS = dict()
-    HAS_RIGHT_ANSWER = defaultdict(bool)
-
-    for network in tqdm(args.networks):
-        vector = np.zeros((N_CLASSES), dtype=np.float32)
-        print(network)
-        distances = np.load('results/%s.distances_tk64_train.npy' % network)
-        landmarks = np.load('results/%s.landmarks_tk64_train.npy' % network)
-        testids = pickle.load(open('results/%s.testids_tk64_train' % network, 'rb'))
-
-        i = 0
-        dlt = zip(distances, landmarks, testids)
-        for (distance, landmark, test_id) in dlt:
-            TRAIN_DATA[i][landmark[1:]] += np.reciprocal(
-                distance[1:] + K.epsilon())
-            #TRAIN_DATA[i][landmark[1:]] += -np.log(distance[1:] + K.epsilon())
-            TRAIN_LABELS[i] = landmark[0]
-            hra = landmark[0] in landmark[1:]
-            HAS_RIGHT_ANSWER[i] = HAS_RIGHT_ANSWER[i] or hra
-            i = i + 1
-            #if i > 10:
-            #    break
-    TRAIN_DATA = [
-        e[1] for e in sorted(TRAIN_DATA.items()) if HAS_RIGHT_ANSWER[e[0]]
-    ]
-    TRAIN_LABELS = [
-        e[1] for e in sorted(TRAIN_LABELS.items()) if HAS_RIGHT_ANSWER[e[0]]
-    ]
-
-    # cache
-    #os.makedirs('cache', exist_ok=True)
-    #for part in range(math.ceil(len(TRAIN_DATA) / 100000)):
-    #    np.save('cache/nns_train_data_%02d.npy' % part,
-    #            TRAIN_DATA[part * 100000:(part + 1) * 100000])
-    #    np.save('cache/nns_train_labels_%02d.npy' % part,
-    #            TRAIN_LABELS[part * 100000:(part + 1) * 100000])
-    del HAS_RIGHT_ANSWER
-else:
-    cache_files = sorted(glob.glob('cache/nns_train_labels_*.npy'))
-    for cache_file in tqdm(cache_files):
-        if TRAIN_LABELS is None:
-            TRAIN_LABELS = np.load(cache_file)
-        else:
-            TRAIN_LABELS = np.append(TRAIN_LABELS, np.load(cache_file), axis=0)
->>>>>>> 96d1181e3c1d32c5fbb59c45ec886acb9f53bf19
 
 landmark_counts[-1] = 0
 
@@ -241,7 +191,6 @@ def combined_generator(args, IDX, train=True):
 
     i  = 0
     ib = 0
-    missed = 0
     while True:
         l = []
         d = []
@@ -268,15 +217,12 @@ def combined_generator(args, IDX, train=True):
         if ib == args.batch_size:
             yield(x_batch, y_batch)
             ib = 0
-        #else:
-        #    missed += 1
+
         i += 1
         if i == len(IDX):
             i = 0
             if train:
                 random.shuffle(IDX)
-            print("Missed {}".format(missed/len(IDX)))
-            missed = 0
 
 
 if args.model:
