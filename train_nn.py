@@ -135,7 +135,8 @@ landmark_log_counts = { k : 1+ np.log(v) for k,v in enumerate(_landmark_counts)}
 landmark_log_counts[-1] = 0
 
 if args.top_landmark_percent != 1.:
-    items = [i for i in range(len(testids)) if testids[i] in _landmarks[_landmark_counts_order][:int(N_CLASSES * args.top_landmark_percent)]]
+    _top_landmarks = set(_landmarks[_landmark_counts_order][:int(N_CLASSES * args.top_landmark_percent)])
+    items = [i for i in range(len(testids)) if testids[i] in _top_landmarks]
     print('Using {} samples of total {} ({:.2f}%)'.format(
         len(items),
         len(testids),
