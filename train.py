@@ -114,9 +114,11 @@ parser.add_argument('-vpc', '--val-percent', type=float, default=0.15, help='Val
 parser.add_argument('-ps', '--pavel-split', action='store_true', help='Use Pavel validation split trick')
 parser.add_argument('-fcm', '--freeze-classifier', action='store_true', help='Freeze classifier weights (useful to fine-tune FC layers)')
 parser.add_argument('-fac', '--freeze-all-classifiers', action='store_true', help='Freeze all classifier (feature extractor) weights when using -id')
+parser.add_argument('-t25', '--top25', action='store_true', help='top 25%')
 
 # augmentations
 parser.add_argument('-aa', '--augment-always', action='store_true', help='If set will try to augment (based on prob) always (does not wait until 1st seen sample)')
+parser.add_argument('-naa', '--no-auto-augment', action='store_true', help='Dont force auto-augment always (e.g. with -w or -l)')
 parser.add_argument('-aps', '--augmentation-probability-soft', type=float, default=1., help='Probability of soft augmentations after 1st seen sample (or always w/ -aa)')
 parser.add_argument('-aph', '--augmentation-probability-hard', type=float, default=0.5, help='Probability of hard augmentations after 1st seen sample (or always w/ -aa)')
 
@@ -165,7 +167,7 @@ if args.include_distractors:
     args.freeze_classifier = True
     print("Info: auto-setting --freeze-classifier because --include-distractors")
 
-if (args.model or args.weights) and (not args.triplet_loss) and training:
+if (args.model or args.weights) and (not args.triplet_loss) and training and (not args.no_auto_augment):
     args.augment_always = True
     print("Info: auto-setting --augment-always because -m or -w")
 
@@ -214,16 +216,25 @@ cat_to_ids      = defaultdict(list)
 cat_to_items    = defaultdict(list)
 landmark_to_cat = { }
 cat_to_landmark = { }
+
+if args.top25:
+    top25 = set(open('top3750.txt').read().splitlines())
+
 # since we may get holes in landmark (ids) from the CSV file
 # we'll use cat (category) starting from 0 and keep a few dicts to map around
 #cat = -1
 max_landmark = -1
 pavel_ids = set()
+top25_ids = set()
+landmarks_remap = dict()
+
 with open(TRAIN_CSV, 'r') as csvfile:
     reader = csv.reader(csvfile, delimiter=',', quotechar='|')
     next(reader)
     for row in reader:
         idx, landmark, url = row[0][1:-1], int(row[2]), row[1]
+        if args.top25 and str(landmark) not in top25:
+            continue
         if idx in TRAIN_IDS:
             if landmark in landmark_to_cat:
                 landmark_cat = landmark_to_cat[landmark]
@@ -240,6 +251,8 @@ with open(TRAIN_CSV, 'r') as csvfile:
             cat_to_ids[landmark_cat].append(idx)
             if "lh3.goog" in url:
                 pavel_ids.add(idx)
+            top25_ids.add(idx)
+ 
 
 N_CLASSES = len(landmark_to_cat.keys())
 
@@ -256,11 +269,22 @@ if args.include_distractors:
         landmark_to_ids[landmark].append(idx)
         cat_to_ids[landmark_cat].append(idx)
 
-print(len(id_to_landmark.keys()), N_CLASSES, max_landmark)
-assert N_CLASSES == (max_landmark +1)
+#print(len(id_to_landmark.keys()), N_CLASSES, max_landmark)
+#assert N_CLASSES == (max_landmark +1)
+keys = list(landmark_to_cat.keys())
+for i in range(N_CLASSES):
+    landmarks_remap[keys[i]] = i
 
 def get_class(item):
-    return id_to_cat[os.path.splitext(os.path.basename(item))[0]]
+    #return id_to_cat[os.path.splitext(os.path.basename(item))[0]]
+    if args.top25:
+        try:
+            label = landmarks_remap[id_to_cat[os.path.splitext(os.path.basename(item))[0]]]
+        except:
+            label = -1
+        return label
+    else:
+        return id_to_cat[os.path.splitext(os.path.basename(item))[0]]
 
 def get_id(item):
     return os.path.splitext(os.path.basename(item))[0]
@@ -283,6 +307,8 @@ else:
         len(TRAIN_JPGS), ))
 
 TRAIN_CATS = [ get_class(idx) for idx in TRAIN_JPGS ]
+TRAIN_JPGS = [ idx for idx in TRAIN_JPGS if get_class(idx) != -1 ]
+TRAIN_CATS = [ e for e in TRAIN_CATS if e != -1 ]
 
 def preprocess_image(img):
     
@@ -963,8 +989,8 @@ elif True:
 
             loss = K.relu(m +  d_p1_p2 - d_p1_n1 ) + K.relu(m +  d_p1_p2 - d_p2_n1)
             
-            # Eq (3,4)
-            loss += 1e-4 * ( \
+            # Eq (3,4) note: lambda trade-off param confirmed to be 1e-3 by the paper authors (by email)
+            loss += 1e-3 * ( \
                 K.sum(K.square(p1), axis=-1, keepdims=True) + \
                 K.sum(K.square(p2), axis=-1, keepdims=True) + \
                 K.sum(K.square(n1), axis=-1, keepdims=True))
@@ -1108,7 +1134,8 @@ elif True:
         (('-topk'  + str(args.top_k)) if args.top_k != 0. else '') + \
         ('-cas' if args.class_aware_sampling else '') + \
         ('-nd' if args.no_dense else '') + \
-        ('-ps' if args.pavel_split else '')
+        ('-ps' if args.pavel_split else '') + \
+        ('-top25' if args.top25 else '')
 
     print("Model name: " + model_name)
 
@@ -1124,6 +1151,10 @@ if training:
         if args.pavel_split:
             ids_train = [item for item in TRAIN_JPGS if get_id(item) not in pavel_ids]
             ids_val   = list(set(TRAIN_JPGS).difference(set(ids_train)))
+        elif args.top25:
+            TRAIN_JPGS = [item for item in TRAIN_JPGS if get_id(item) in top25_ids]
+            ids_train, ids_val, _, _ = train_test_split(
+                TRAIN_JPGS, TRAIN_CATS, test_size=args.val_percent, random_state=SEED, stratify=TRAIN_CATS)
         else:
             # split train/val using stratification
             ids_train, ids_val, _, _ = train_test_split(
@@ -1288,7 +1319,9 @@ elif args.test or args.test_train:
 
                     items = [Path(TRAIN_DIR) / (idx + '.jpg') for idx in idxs]
 
+                    #print(items)
                     batch_results = pool.map(process_item_func, items)
+                    #print(batch_results)
 
                     f = 0
                     for idx, (img, _, _) in zip(idxs, batch_results):
@@ -1296,6 +1329,8 @@ elif args.test or args.test_train:
                         if img is not None:
 
                             imgs[batch_id,...] = img
+                            #print(f, idx, batch_id)
+                            #show_image(img)
                             batch_idx.append(idx)
                             batch_id += 1
 
@@ -1311,6 +1346,8 @@ elif args.test or args.test_train:
                         f += batch_id
 
                     np.save(features_dir / str(landmark), features[:f])
+                    #if landmark == 10:
+                    #    break
 
             elif args.test:
 
